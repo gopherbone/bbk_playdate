@@ -1,0 +1,12 @@
+/Users/nick/bbk_playdate/tools/difftest/target/release/deps/mos6502-3c4e8167d9d54e3d.d: /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/lib.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/cpu.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/instruction.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/memory.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/registers.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/../README.md
+
+/Users/nick/bbk_playdate/tools/difftest/target/release/deps/libmos6502-3c4e8167d9d54e3d.rlib: /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/lib.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/cpu.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/instruction.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/memory.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/registers.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/../README.md
+
+/Users/nick/bbk_playdate/tools/difftest/target/release/deps/libmos6502-3c4e8167d9d54e3d.rmeta: /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/lib.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/cpu.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/instruction.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/memory.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/registers.rs /Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/../README.md
+
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/lib.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/cpu.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/instruction.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/memory.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/registers.rs:
+/Users/nick/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mos6502-0.10.1/src/../README.md:

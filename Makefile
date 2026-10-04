@@ -72,7 +72,7 @@ SIMCOMPILER += $(RUST_SIM_LIB)
 $(OBJDIR)/pdex.elf: $(RUST_DEVICE_LIB)
 $(OBJDIR)/pdex.$(DYLIB_EXT): $(RUST_SIM_LIB)
 
-.PHONY: FORCE run install
+.PHONY: FORCE run install check
 
 $(CORE_STAMP): $(CORE_PATCH) $(wildcard $(UPSTREAM_CORE)/src/*) $(UPSTREAM_CORE)/Cargo.toml
 	rm -rf gen/bbkemu-core
@@ -86,6 +86,10 @@ $(RUST_DEVICE_LIB): $(CORE_STAMP) FORCE
 
 $(RUST_SIM_LIB): $(CORE_STAMP) FORCE
 	cargo build --release --manifest-path rust/Cargo.toml
+
+# Differential tests of the fast paths (host only). Lockstep games: make check GAMES="a.gam b.gam" ROMS=dir
+check: $(CORE_STAMP)
+	cargo run --release --manifest-path tools/difftest/Cargo.toml -- 3000 $(GAMES)
 
 run: simulator
 	open -a "$(SDK)/bin/Playdate Simulator.app" $(PRODUCT)

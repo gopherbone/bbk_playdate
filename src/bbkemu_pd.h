@@ -15,10 +15,15 @@ void bbk_load_rom8(BBKEmulator* emu, const uint8_t* data, size_t len);
 void bbk_load_rome(BBKEmulator* emu, const uint8_t* data, size_t len);
 bool bbk_load_game(BBKEmulator* emu, const uint8_t* data, size_t len, char* err, size_t err_len);
 
-void bbk_run_frame(BBKEmulator* emu);
+// Runs up to `count` frames (fewer if the game exits) and returns how many ran.
+// `hook`, if given, is called before each frame and may use the input functions.
+typedef void BBKFrameHook(void* userdata, uint32_t frame);
+uint32_t bbk_run_frames(BBKEmulator* emu, uint32_t count, BBKFrameHook* hook, void* userdata);
 bool bbk_is_running(const BBKEmulator* emu);
 void bbk_key_down(BBKEmulator* emu, uint8_t code);
 void bbk_key_up(BBKEmulator* emu);
+// Runs every instruction through mos6502 instead of the fast path (for comparison).
+void bbk_set_reference(BBKEmulator* emu, bool reference);
 void bbk_set_cpu_rate(BBKEmulator* emu, float rate);
 
 // Draws into a 1-bit frame buffer (MSB first, 1 = white). Portrait is 2x (318x192),

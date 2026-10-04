@@ -60,9 +60,27 @@ options if a game needs the A4988.
 
 ## Performance
 
-The original dictionaries ran a 6502 at 4 MHz. Turn on **Show performance** in options to see
-how long each emulated frame takes. Anything under 100% load runs at full speed; above that the
-game runs slower than real time.
+Not full speed yet. The dictionaries ran a 6502 at 4 MHz, about 21,000 instructions per 60 Hz
+frame. On a Rev B Playdate, emulating a frame of Demonbane's title screen takes about 39 ms,
+against a budget of 16.7 ms, so games run at roughly 40% speed. The unmodified core took about
+194 ms.
+
+The Playdate's main memory is slow external PSRAM: a cache miss costs about 0.9 µs and every
+store to a new cache line about 0.56 µs. The game task's stack is in fast tightly-coupled memory,
+but there is only about 8 KB of it. The speedups so far:
+
+- **A compact fast path for the documented 6502 opcodes** (`tools/gen_fast6502.py`) instead of
+  mos6502's generic decoder. Everything it doesn't cover still runs through mos6502.
+- **A frame loop that keeps CPU registers, cycle counts and timer state in locals**, writing
+  them back only for interrupts, BRK and fallbacks.
+- **Inlined fast paths for RAM, flash and ROM reads and writes.**
+- **`opt-level = "s"`.** Smaller code measured faster than `-O3`.
+
+`make check` compares all of these against the original code: memory accesses exhaustively,
+every opcode from thousands of random states, and whole games in lockstep against the original
+loop running on mos6502. Turn on **Show performance** in options to see the frame cost on your
+device. Its `bench` figure averages emulated frames 300 to 599, so builds can be compared on
+identical work.
 
 ## Building
 

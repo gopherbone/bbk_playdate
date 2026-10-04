@@ -25,7 +25,8 @@ opt-level = 1
 
 [profile.release]
 panic = "abort"
-opt-level = 3
+# Smaller code measured ~20% faster than opt-level 3 on device (cache pressure).
+opt-level = "s"
 lto = true
 codegen-units = 1
 debug = false

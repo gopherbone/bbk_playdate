@@ -218,14 +218,45 @@ pub unsafe extern "C" fn bbk_load_game(
     }
 }
 
+/// Runs every instruction through mos6502 instead of the fast path (for comparison).
+///
 /// # Safety
 /// `emu` must be a live handle or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn bbk_run_frame(emu: *mut BBKEmulator) {
+pub unsafe extern "C" fn bbk_set_reference(emu: *mut BBKEmulator, reference: bool) {
     if let Some(e) = emu_mut(emu) {
-        e.emu.run_frame();
+        e.emu.cpu.reference = reference;
     }
 }
+
+/// Called before each frame of `bbk_run_frames` with the frame's index.
+pub type FrameHook = unsafe extern "C" fn(userdata: *mut c_void, frame: u32);
+
+/// Runs up to `count` frames, stopping early if the game exits; returns the
+/// number run. `hook` (if any) runs before each frame and may call the input
+/// functions.
+///
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_run_frames(
+    emu: *mut BBKEmulator,
+    count: u32,
+    hook: Option<FrameHook>,
+    userdata: *mut c_void,
+) -> u32 {
+    let Some(e) = emu_mut(emu) else { return 0 };
+    let mut ran = 0;
+    while ran < count && e.emu.is_running() {
+        if let Some(hook) = hook {
+            hook(userdata, ran);
+        }
+        e.emu.run_frame();
+        ran += 1;
+    }
+    ran
+}
+
 
 /// # Safety
 /// `emu` must be a live handle or NULL.

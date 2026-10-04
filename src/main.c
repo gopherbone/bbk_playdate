@@ -355,6 +355,10 @@ static int autosave_countdown;
 static unsigned int last_ms;
 static int frame_acc; // thousandths of a frame
 static float frame_cost_ms; // smoothed time per emulated frame
+// Deterministic benchmark: average cost of emulated frames 300-599 after boot.
+static int game_frames;
+static float bench_ms;
+static float bench_ms_result;
 static int toast_frames;
 static char toast_text[64];
 
@@ -519,6 +523,12 @@ static void start_game(const char* name) {
     autosave_countdown = AUTOSAVE_FRAMES;
     frame_acc = 0;
     frame_cost_ms = 0;
+    game_frames = 0;
+    bench_ms = 0;
+    bench_ms_result = 0;
+#ifdef BBK_REFERENCE
+    bbk_set_reference(emu, 1);
+#endif
     toast_frames = 0;
     last_ms = pd->system->getCurrentTimeMilliseconds();
     game_add_menu_items();
@@ -590,8 +600,10 @@ static void game_draw_status(int force) {
     } else if (settings.show_speed) {
         // Share of each real-time frame (16.7 ms) the emulator needs.
         int load = (int)(frame_cost_ms * 60.0f / 10.0f + 0.5f);
-        snprintf(text, sizeof text, "%d.%d ms/frame %d%% load %d fps", (int)frame_cost_ms,
-                 (int)(frame_cost_ms * 10) % 10, load, (int)(pd->display->getFPS() + 0.5f));
+        int n = snprintf(text, sizeof text, "%d.%d ms/frame %d%% load %d fps", (int)frame_cost_ms,
+                         (int)(frame_cost_ms * 10) % 10, load, (int)(pd->display->getFPS() + 0.5f));
+        if (bench_ms_result > 0)
+            snprintf(text + n, sizeof text - n, "  bench %d.%d", (int)bench_ms_result, (int)(bench_ms_result * 10) % 10);
     }
     if (!force && !strcmp(text, status_shown)) return;
     memcpy(status_shown, text, sizeof text);
@@ -603,6 +615,26 @@ static void game_draw_status(int force) {
         draw_wrapped(small_font, text, x, y, w);
     } else {
         pd->graphics->drawText(text, strlen(text), kUTF8Encoding, x, y);
+    }
+}
+
+// Runs inside bbk_run_frames before each emulated frame: key repeat, keypad taps, autosave.
+static void before_frame(void* ud, uint32_t frame) {
+    (void)ud;
+    (void)frame;
+    if (tap_code >= 0) {
+        if (tap_frames == TAP_FRAMES) bbk_key_down(emu, tap_code);
+        if (--tap_frames <= 0) {
+            bbk_key_up(emu);
+            tap_code = -1;
+        }
+    } else if (held_count > 0 && --repeat_countdown <= 0) {
+        bbk_key_down(emu, held[held_count - 1]);
+        repeat_countdown = REPEAT_INTERVAL;
+    }
+    if (--autosave_countdown <= 0) {
+        autosave_countdown = AUTOSAVE_FRAMES;
+        save_battery();
     }
 }
 
@@ -638,30 +670,18 @@ static void game_update(void) {
     }
 
     float t0 = pd->system->getElapsedTime();
-    for (int i = 0; i < frames && emu; i++) {
-        if (tap_code >= 0) {
-            if (tap_frames == TAP_FRAMES) bbk_key_down(emu, tap_code);
-            if (--tap_frames <= 0) {
-                bbk_key_up(emu);
-                tap_code = -1;
-            }
-        } else if (held_count > 0 && --repeat_countdown <= 0) {
-            bbk_key_down(emu, held[held_count - 1]);
-            repeat_countdown = REPEAT_INTERVAL;
-        }
-        bbk_run_frame(emu);
-        if (--autosave_countdown <= 0) {
-            autosave_countdown = AUTOSAVE_FRAMES;
-            save_battery();
-        }
-        if (!bbk_is_running(emu)) {
-            end_game();
-            show_message("Game ended", "The game exited back to the dictionary menu.", SCREEN_PICKER);
-            return;
-        }
+    int ran = frames > 0 ? bbk_run_frames(emu, frames, before_frame, NULL) : 0;
+    if (!bbk_is_running(emu)) {
+        end_game();
+        show_message("Game ended", "The game exited back to the dictionary menu.", SCREEN_PICKER);
+        return;
     }
-    if (frames > 0) {
-        float cost = (pd->system->getElapsedTime() - t0) * 1000.0f / frames;
+    if (ran > 0) {
+        float spent = (pd->system->getElapsedTime() - t0) * 1000.0f;
+        if (game_frames >= 300 && game_frames + ran <= 600) bench_ms += spent;
+        game_frames += ran;
+        if (game_frames >= 600 && bench_ms_result == 0) bench_ms_result = bench_ms / 300;
+        float cost = spent / ran;
         frame_cost_ms = frame_cost_ms == 0 ? cost : frame_cost_ms * 0.9f + cost * 0.1f;
         pd->system->resetElapsedTime();
     }
@@ -1090,6 +1110,76 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg) {
         read_kv("settings.txt", apply_setting, NULL);
         pd->display->setRefreshRate(REFRESH_RATE);
         pd->system->setUpdateCallback(update, NULL);
+#ifdef BBK_CALIBRATE
+        {
+            volatile uint32_t sink;
+            uint32_t v = 1;
+            pd->system->resetElapsedTime();
+            for (int i = 0; i < 10000000; i++) v = v * 1664525u + 1013904223u;
+            sink = v;
+            float alu = pd->system->getElapsedTime();
+            uint8_t* buf = pd->system->realloc(NULL, 1 << 20);
+            memset(buf, 1, 1 << 20);
+            uint32_t sum = 0;
+            pd->system->resetElapsedTime();
+            for (int r = 0; r < 10; r++)
+                for (int i = 0; i < (1 << 20); i += 32) sum += buf[i];
+            float stream = pd->system->getElapsedTime();
+            uint8_t small[4096];
+            memset(small, 1, sizeof small);
+            pd->system->resetElapsedTime();
+            for (int r = 0; r < 2560; r++)
+                for (int i = 0; i < 4096; i += 32) sum += ((volatile uint8_t*)small)[i];
+            float stack = pd->system->getElapsedTime();
+            pd->system->resetElapsedTime();
+            for (int r = 0; r < 2560; r++)
+                for (int i = 0; i < 4096; i += 32) sum += ((volatile uint8_t*)buf)[i];
+            float heapsmall = pd->system->getElapsedTime();
+            pd->system->resetElapsedTime();
+            for (int r = 0; r < 2560; r++)
+                for (int i = 0; i < 4096; i += 32) ((volatile uint8_t*)buf)[i] = (uint8_t)r;
+            float heapstore = pd->system->getElapsedTime();
+            pd->system->resetElapsedTime();
+            for (int r = 0; r < 2560; r++)
+                for (int i = 0; i < 4096; i += 32) ((volatile uint8_t*)small)[i] = (uint8_t)r;
+            float stackstore = pd->system->getElapsedTime();
+            pd->system->resetElapsedTime();
+            for (int r = 0; r < 81920; r++) ((volatile uint8_t*)buf)[r & 63] = (uint8_t)r;
+            float heapsame = pd->system->getElapsedTime();
+            static uint8_t sbuf[8192] __attribute__((aligned(32)));
+            pd->system->resetElapsedTime();
+            for (int r = 0; r < 2560; r++)
+                for (int i = 0; i < 4096; i += 32) ((volatile uint8_t*)sbuf)[i] = (uint8_t)r;
+            float staticstore = pd->system->getElapsedTime();
+            pd->system->resetElapsedTime();
+            for (int r = 0; r < 2560; r++)
+                for (int i = 0; i < 4096; i += 32) sum += ((volatile uint8_t*)sbuf)[i];
+            float staticread = pd->system->getElapsedTime();
+            {
+                // Read-only scan below the stack pointer for FreeRTOS's 0xA5 stack fill.
+                volatile uint32_t* sp = (volatile uint32_t*)__builtin_frame_address(0);
+                volatile uint32_t* q = (volatile uint32_t*)(((uintptr_t)sp - 4096) & ~3u);
+                uint32_t* lowest_fill = NULL;
+                int run = 0;
+                for (volatile uint32_t* w = q; (uintptr_t)w > 0x20000000u; w--) {
+                    if (*w == 0xA5A5A5A5u) { lowest_fill = (uint32_t*)w; run++; }
+                    else if (run > 16) break;
+                    else run = 0;
+                }
+                pd->system->logToConsole("CAL4 frame %p, 0xA5 fill reaches down to %p (%d words in last run); free below frame ~%d bytes",
+                    (void*)sp, (void*)lowest_fill, run, lowest_fill ? (int)((uintptr_t)sp - (uintptr_t)lowest_fill) : -1);
+            }
+            pd->system->logToConsole("CAL3 static-store %d ns, static-read %d ns, sbuf at %p, heap at %p, stack at %p",
+                (int)(staticstore * 1e9f / (2560 * 128)), (int)(staticread * 1e9f / (2560 * 128)), (void*)sbuf, (void*)buf, (void*)small);
+            pd->system->logToConsole("CAL2 heap-store %d ns, stack-store %d ns, heap-store-same-line %d ns",
+                (int)(heapstore * 1e9f / (2560 * 128)), (int)(stackstore * 1e9f / (2560 * 128)), (int)(heapsame * 1e9f / 81920));
+            sink = sum;
+            (void)sink;
+            pd->system->realloc(buf, 0);
+            pd->system->logToConsole("CAL alu %d ns/iter, sdram-miss %d ns/line, stack-hit %d ns/access, heap-hit %d ns/access",
+                (int)(alu * 1e9f / 1e7f), (int)(stream * 1e9f / (10 * 32768)), (int)(stack * 1e9f / (2560 * 128)), (int)(heapsmall * 1e9f / (2560 * 128)));
+        }
+#endif
         break;
     }
     case kEventPause:

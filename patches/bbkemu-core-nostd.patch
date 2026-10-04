@@ -88,6 +88,38 @@
  use mos6502::cpu::CPU;
  use mos6502::instruction::Nmos6502;
  
+@@ -9,12 +12,18 @@
+ pub struct CpuWrapper {
+     /// The underlying mos6502 CPU
+     pub inner: CPU<Memory, Nmos6502>,
++    /// Run every instruction through mos6502 (for checking the fast path).
++    pub reference: bool,
++    /// Instructions executed (for profiling).
++    pub steps: u64,
+ }
+ 
+ impl CpuWrapper {
+     pub fn new(memory: Memory) -> Self {
+         Self {
+             inner: CPU::new(memory, Nmos6502),
++            reference: false,
++            steps: 0,
+         }
+     }
+ 
+@@ -75,6 +84,12 @@
+ 
+     /// Execute a single instruction
+     pub fn step(&mut self) -> u32 {
++        self.steps += 1;
++        if !self.reference {
++            if let Some(cycles) = crate::fast6502::step_cpu(&mut self.inner) {
++                return cycles;
++            }
++        }
+         let before = self.inner.cycles;
+ 
+         // Fetch and decode the next instruction
 --- a/src/debug.rs
 +++ b/src/debug.rs
 @@ -1,7 +1,10 @@
@@ -120,7 +152,18 @@
              watchpoints: Vec::new(),
              stepping: false,
              trace_log: Vec::new(),
-@@ -144,7 +147,7 @@
+@@ -85,6 +88,10 @@
+     }
+ 
+     /// Check if address has a breakpoint
++    pub fn has_breakpoints(&self) -> bool {
++        !self.breakpoints.is_empty()
++    }
++
+     pub fn has_breakpoint(&self, addr: u16) -> bool {
+         self.breakpoints.contains(&addr)
+     }
+@@ -144,7 +151,7 @@
      }
  
      /// Get all breakpoints
@@ -131,19 +174,118 @@
  }
 --- a/src/emulator.rs
 +++ b/src/emulator.rs
-@@ -1,7 +1,10 @@
+@@ -1,6 +1,9 @@
  //! Main emulator orchestrator
  
 -use anyhow::Result;
 +#[allow(unused_imports)]
 +use crate::prelude::*;
- 
-+use crate::error::Result;
 +
++use crate::error::Result;
+ 
  use crate::audio::Audio;
  use crate::cheat::CheatEngine;
- use crate::cpu::CpuWrapper;
-@@ -533,7 +536,12 @@
+@@ -252,7 +255,77 @@
+     }
+ 
+     /// Run one frame (~16.67ms at 60fps)
++    ///
++    /// Same behaviour as `run_frame_reference`, but the common case (a
++    /// fast-path instruction with no interrupt pending) keeps the CPU
++    /// registers, cycle counts and timer state in locals for the whole frame:
++    /// on the Playdate each store to a new heap cache line costs ~0.5 us. Any
++    /// other case writes them back and runs the original code.
+     pub fn run_frame(&mut self) {
++        if self.cpu.reference || self.debug.has_breakpoints() {
++            return self.run_frame_reference();
++        }
++        if self.cheat.has_active_cheats() {
++            let (ram, flash) = self.cpu.memory_mut().get_ram_and_flash();
++            self.cheat.apply_cheats(ram, flash);
++        }
++        let cycles_per_frame = (4_000_000.0 / 60.0 * self.cpu_rate) as u32;
++        let timer_step = (400.0 / self.timer_rate) as u32;
++        let mut cycles_run = 0u32;
++        let mut remainder = self.timer_cycle_remainder;
++        let mut cpu_cycles = self.cpu.inner.cycles;
++        let mut steps = self.cpu.steps;
++        let mut r = crate::fast6502::Regs::load(&self.cpu.inner);
++
++        while cycles_run < cycles_per_frame && self.running {
++            let m = &mut self.cpu.inner.memory;
++            let cycles = if m.ram[0x200] & 0x08 != 0 {
++                400 // halted until an interrupt
++            } else if let Some(cycles) = (r.pc != HLE_FAR_RETURN && m.read(r.pc) != 0x00)
++                .then(|| crate::fast6502::step(&mut r, m))
++                .flatten()
++            {
++                steps += 1;
++                cpu_cycles = cpu_cycles.wrapping_add(cycles as u64);
++                // handle_interrupts acts only when one of these is set.
++                let ram = &m.ram;
++                if r.p & 0x04 == 0 && (ram[0x04] & ram[0x23A] & 0x83 != 0 || ram[0x05] & ram[0x23B] & 0xEF != 0) {
++                    r.store(&mut self.cpu.inner);
++                    self.handle_interrupts();
++                    r = crate::fast6502::Regs::load(&self.cpu.inner);
++                }
++                cycles
++            } else {
++                r.store(&mut self.cpu.inner);
++                self.cpu.inner.cycles = cpu_cycles;
++                self.cpu.steps = steps;
++                let cycles = self.step();
++                r = crate::fast6502::Regs::load(&self.cpu.inner);
++                cpu_cycles = self.cpu.inner.cycles;
++                steps = self.cpu.steps;
++                cycles
++            };
++            cycles_run += cycles;
++            remainder += cycles;
++            let ticks = remainder / timer_step;
++            if ticks > 0 {
++                self.cpu.memory_mut().update_timers(ticks);
++                remainder %= timer_step;
++            }
++        }
++        r.store(&mut self.cpu.inner);
++        self.cpu.inner.cycles = cpu_cycles;
++        self.cpu.steps = steps;
++        self.timer_cycle_remainder = remainder;
++
++        if self.frame_count.is_multiple_of(60) {
++            self.cpu.memory_mut().update_rtc();
++        }
++        self.frame_count += 1;
++    }
++
++    /// The original frame loop, one `step` at a time.
++    pub fn run_frame_reference(&mut self) {
+         // Apply cheats at the start of each frame
+         if self.cheat.has_active_cheats() {
+             let (ram, flash) = self.cpu.memory_mut().get_ram_and_flash();
+@@ -325,21 +398,7 @@
+             self.running = false;
+             return 1;
+         }
+-
+-        // Check for JSR instruction - potential syscall
+-        if opcode == 0x20 {
+-            let target = self.cpu.memory().read16(pc + 1);
+-            if target >= 0xD000 {
+-                log::info!(
+-                    "OS call caller=0x{pc:04X} target=0x{target:04X} A={:02X} X={:02X} Y={:02X}",
+-                    self.cpu.a(),
+-                    self.cpu.x(),
+-                    self.cpu.y()
+-                );
+-            }
+ 
+-            // Other JSR calls execute normally
+-        }
+ 
+         // Execute the instruction normally
+         let cycles = self.cpu.step();
+@@ -533,7 +592,12 @@
      /// Render LCD to boolean buffer (true = foreground, false = background)
      pub fn render_lcd_buffer(&mut self) -> [bool; 159 * 96] {
          let mut pixels = [false; 159 * 96];
@@ -156,7 +298,7 @@
          self.cpu.memory_mut().ram[0x400] = self.cpu.memory().ram[0x1000];
          let ram = &self.cpu.memory().ram;
          let mut v = 0x400;
-@@ -541,7 +549,7 @@
+@@ -541,7 +605,7 @@
          for j in (-30i32..=65).rev() {
              let y = if j >= 0 { j } else { -j + 65 } as usize;
              for i in 1..20 {
@@ -165,7 +307,7 @@
                  v += 1;
              }
              v += 13;
-@@ -550,12 +558,10 @@
+@@ -550,12 +614,10 @@
          v = 0x413;
          for j in (-30i32..=64).rev() {
              let y = if j >= 0 { j } else { -j + 65 } as usize;
@@ -204,6 +346,405 @@
 +    ($($arg:tt)*) => {
 +        return Err($crate::error::Error(alloc::format!($($arg)*)))
 +    };
++}
+--- a/src/fast6502.rs
++++ b/src/fast6502.rs
+@@ -0,0 +1,396 @@
++// Generated by tools/gen_fast6502.py from tools/fast6502_body.rs. Do not edit.
++
++// Fast path for the documented NMOS 6502 opcodes over mos6502's CPU struct,
++// matching mos6502's results exactly; see tools/gen_fast6502.py for what falls
++// back. Kept compact (one addressing-mode switch, one operation switch) so the
++// interpreter fits the Playdate's instruction cache.
++
++use mos6502::cpu::CPU;
++use mos6502::instruction::Nmos6502;
++use mos6502::memory::Bus;
++use mos6502::registers::Status;
++
++use crate::memory::Memory;
++
++const SLOW: u32 = 0;
++const ORA: u32 = 1;
++const AND: u32 = 2;
++const EOR: u32 = 3;
++const ADC: u32 = 4;
++const SBC: u32 = 5;
++const CMP: u32 = 6;
++const CPX: u32 = 7;
++const CPY: u32 = 8;
++const LDA: u32 = 9;
++const LDX: u32 = 10;
++const LDY: u32 = 11;
++const BIT: u32 = 12;
++const STA: u32 = 13;
++const STX: u32 = 14;
++const STY: u32 = 15;
++const ASL: u32 = 16;
++const LSR: u32 = 17;
++const ROL: u32 = 18;
++const ROR: u32 = 19;
++const INC: u32 = 20;
++const DEC: u32 = 21;
++const BR: u32 = 22;
++const JMP: u32 = 23;
++const JSR: u32 = 24;
++const RTS: u32 = 25;
++const RTI: u32 = 26;
++const PHA: u32 = 27;
++const PHP: u32 = 28;
++const PLA: u32 = 29;
++const PLP: u32 = 30;
++const CLF: u32 = 31;
++const SEF: u32 = 32;
++const TAX: u32 = 33;
++const TAY: u32 = 34;
++const TXA: u32 = 35;
++const TYA: u32 = 36;
++const TSX: u32 = 37;
++const TXS: u32 = 38;
++const INX: u32 = 39;
++const INY: u32 = 40;
++const DEX: u32 = 41;
++const DEY: u32 = 42;
++const NOP: u32 = 43;
++const M_IMP: u32 = 0;
++const M_ACC: u32 = 1;
++const M_IMM: u32 = 2;
++const M_ZP: u32 = 3;
++const M_ZPX: u32 = 4;
++const M_ZPY: u32 = 5;
++const M_ABS: u32 = 6;
++const M_ABSX: u32 = 7;
++const M_ABSY: u32 = 8;
++const M_IZX: u32 = 9;
++const M_IZY: u32 = 10;
++const M_IND: u32 = 11;
++const M_REL: u32 = 12;
++
++/// Per opcode: kind (bits 0-5), addressing mode (6-9), base cycles (10-13),
++/// parameter (16-24: flag mask, plus bit 8 for "branch if set").
++static TABLE: [u32; 256] = [
++    0x0000000, 0x0001A41, 0x0000000, 0x0000000, 0x0000000, 0x0000CC1, 0x00014D0, 0x0000000,
++    0x0000C1C, 0x0000881, 0x0000850, 0x0000000, 0x0000000, 0x0001181, 0x0001990, 0x0000000,
++    0x0800B16, 0x0001681, 0x0000000, 0x0000000, 0x0000000, 0x0001101, 0x0001910, 0x0000000,
++    0x001081F, 0x0001201, 0x0000000, 0x0000000, 0x0000000, 0x00011C1, 0x0001DD0, 0x0000000,
++    0x0001998, 0x0001A42, 0x0000000, 0x0000000, 0x0000CCC, 0x0000CC2, 0x00014D2, 0x0000000,
++    0x000101E, 0x0000882, 0x0000852, 0x0000000, 0x000118C, 0x0001182, 0x0001992, 0x0000000,
++    0x1800B16, 0x0001682, 0x0000000, 0x0000000, 0x0000000, 0x0001102, 0x0001912, 0x0000000,
++    0x0010820, 0x0001202, 0x0000000, 0x0000000, 0x0000000, 0x00011C2, 0x0001DD2, 0x0000000,
++    0x000181A, 0x0001A43, 0x0000000, 0x0000000, 0x0000000, 0x0000CC3, 0x00014D1, 0x0000000,
++    0x0000C1B, 0x0000883, 0x0000851, 0x0000000, 0x0000D97, 0x0001183, 0x0001991, 0x0000000,
++    0x0400B16, 0x0001683, 0x0000000, 0x0000000, 0x0000000, 0x0001103, 0x0001911, 0x0000000,
++    0x004081F, 0x0001203, 0x0000000, 0x0000000, 0x0000000, 0x00011C3, 0x0001DD1, 0x0000000,
++    0x0001819, 0x0001A44, 0x0000000, 0x0000000, 0x0000000, 0x0000CC4, 0x00014D3, 0x0000000,
++    0x000101D, 0x0000884, 0x0000853, 0x0000000, 0x00016D7, 0x0001184, 0x0001993, 0x0000000,
++    0x1400B16, 0x0001684, 0x0000000, 0x0000000, 0x0000000, 0x0001104, 0x0001913, 0x0000000,
++    0x0040820, 0x0001204, 0x0000000, 0x0000000, 0x0000000, 0x00011C4, 0x0001DD3, 0x0000000,
++    0x0000000, 0x0001A4D, 0x0000000, 0x0000000, 0x0000CCF, 0x0000CCD, 0x0000CCE, 0x0000000,
++    0x000082A, 0x0000000, 0x0000823, 0x0000000, 0x000118F, 0x000118D, 0x000118E, 0x0000000,
++    0x0010B16, 0x0001A8D, 0x0000000, 0x0000000, 0x000110F, 0x000110D, 0x000114E, 0x0000000,
++    0x0000824, 0x000160D, 0x0000826, 0x0000000, 0x0000000, 0x00015CD, 0x0000000, 0x0000000,
++    0x000088B, 0x0001A49, 0x000088A, 0x0000000, 0x0000CCB, 0x0000CC9, 0x0000CCA, 0x0000000,
++    0x0000822, 0x0000889, 0x0000821, 0x0000000, 0x000118B, 0x0001189, 0x000118A, 0x0000000,
++    0x1010B16, 0x0001689, 0x0000000, 0x0000000, 0x000110B, 0x0001109, 0x000114A, 0x0000000,
++    0x040081F, 0x0001209, 0x0000825, 0x0000000, 0x00011CB, 0x00011C9, 0x000120A, 0x0000000,
++    0x0000888, 0x0001A46, 0x0000000, 0x0000000, 0x0000CC8, 0x0000CC6, 0x00014D5, 0x0000000,
++    0x0000828, 0x0000886, 0x0000829, 0x0000000, 0x0001188, 0x0001186, 0x0001995, 0x0000000,
++    0x0020B16, 0x0001686, 0x0000000, 0x0000000, 0x0000000, 0x0001106, 0x0001915, 0x0000000,
++    0x008081F, 0x0001206, 0x0000000, 0x0000000, 0x0000000, 0x00011C6, 0x0001DD5, 0x0000000,
++    0x0000887, 0x0001A45, 0x0000000, 0x0000000, 0x0000CC7, 0x0000CC5, 0x00014D4, 0x0000000,
++    0x0000827, 0x0000885, 0x000082B, 0x0000000, 0x0001187, 0x0001185, 0x0001994, 0x0000000,
++    0x1020B16, 0x0001685, 0x0000000, 0x0000000, 0x0000000, 0x0001105, 0x0001914, 0x0000000,
++    0x0080820, 0x0001205, 0x0000000, 0x0000000, 0x0000000, 0x00011C5, 0x0001DD4, 0x0000000,
++];
++
++const C: u8 = 0x01;
++const Z: u8 = 0x02;
++const D: u8 = 0x08;
++const V: u8 = 0x40;
++const N: u8 = 0x80;
++
++#[inline(always)]
++fn nz(p: u8, v: u8) -> u8 {
++    (p & !(Z | N)) | (v & N) | if v == 0 { Z } else { 0 }
++}
++
++#[inline(always)]
++fn rd16(m: &Memory, addr: u16) -> u16 {
++    u16::from_le_bytes([m.read(addr), m.read(addr.wrapping_add(1))])
++}
++
++/// CPU registers held outside mos6502's CPU struct, so a frame's worth of
++/// instructions can run with them in locals: on the Playdate every store to a
++/// new heap cache line costs ~0.5 us.
++#[derive(Clone, Copy, PartialEq, Debug)]
++pub struct Regs {
++    pub a: u8,
++    pub x: u8,
++    pub y: u8,
++    pub s: u8,
++    pub p: u8,
++    pub pc: u16,
++}
++
++impl Regs {
++    #[inline(always)]
++    pub fn load(cpu: &CPU<Memory, Nmos6502>) -> Self {
++        let r = &cpu.registers;
++        Self {
++            a: r.accumulator,
++            x: r.index_x,
++            y: r.index_y,
++            s: r.stack_pointer.0,
++            p: r.status.bits(),
++            pc: r.program_counter,
++        }
++    }
++
++    #[inline(always)]
++    pub fn store(&self, cpu: &mut CPU<Memory, Nmos6502>) {
++        let r = &mut cpu.registers;
++        r.accumulator = self.a;
++        r.index_x = self.x;
++        r.index_y = self.y;
++        r.stack_pointer.0 = self.s;
++        r.status = Status::from_bits_truncate(self.p);
++        r.program_counter = self.pc;
++    }
++}
++
++/// `step` over mos6502's CPU struct, also advancing its cycle count.
++#[inline(always)]
++pub fn step_cpu(cpu: &mut CPU<Memory, Nmos6502>) -> Option<u32> {
++    let mut r = Regs::load(cpu);
++    let cycles = step(&mut r, &mut cpu.memory)?;
++    r.store(cpu);
++    cpu.cycles = cpu.cycles.wrapping_add(cycles as u64);
++    Some(cycles)
++}
++
++/// Runs one instruction if the fast path covers it, returning its cycles;
++/// returns None, with no state touched, when mos6502 must run it instead.
++#[inline(always)]
++pub fn step(r: &mut Regs, m: &mut Memory) -> Option<u32> {
++    let pc = r.pc;
++    if !(0x0100..=0xFFFC).contains(&pc) {
++        return None;
++    }
++    let e = TABLE[m.read(pc) as usize];
++    let kind = e & 0x3F;
++    let mut p = r.p;
++    if kind == SLOW || ((kind == ADC || kind == SBC) && p & D != 0) {
++        return None;
++    }
++    let mode = (e >> 6) & 0xF;
++    let mut cycles = (e >> 10) & 0xF;
++    let param = e >> 16;
++    let mut a = r.a;
++    let mut x = r.x;
++    let mut y = r.y;
++    let mut s = r.s;
++
++    // Operand bytes are plain reads: with PC in 0x0100..=0xFFFC they can't
++    // touch the side-effecting DATA registers. Pointer and data accesses go
++    // through get_byte, in the same order as mos6502.
++    let op1 = pc.wrapping_add(1);
++    let mut ea: u16 = 0;
++    let mut crossed = false;
++    let mut next = pc.wrapping_add(match mode {
++        M_IMP | M_ACC => 1,
++        M_ABS | M_ABSX | M_ABSY | M_IND => 3,
++        _ => 2,
++    });
++    match mode {
++        M_ZP => ea = m.read(op1) as u16,
++        M_ZPX => ea = m.read(op1).wrapping_add(x) as u16,
++        M_ZPY => ea = m.read(op1).wrapping_add(y) as u16,
++        M_ABS => ea = rd16(m, op1),
++        M_ABSX | M_ABSY => {
++            let base = rd16(m, op1);
++            ea = base.wrapping_add(if mode == M_ABSX { x } else { y } as u16);
++            crossed = (base ^ ea) & 0xFF00 != 0;
++        }
++        M_IZX | M_IZY => {
++            let t = m.read(op1).wrapping_add(if mode == M_IZX { x } else { 0 });
++            let lo = m.get_byte(t as u16);
++            let hi = m.get_byte(t.wrapping_add(1) as u16);
++            ea = u16::from_le_bytes([lo, hi]);
++            if mode == M_IZY {
++                let base = ea;
++                ea = base.wrapping_add(y as u16);
++                crossed = (base ^ ea) & 0xFF00 != 0;
++            }
++        }
++        M_IND => {
++            let ptr = rd16(m, op1);
++            let lo = m.get_byte(ptr);
++            let hi = m.get_byte((ptr & 0xFF00) | (ptr.wrapping_add(1) & 0x00FF));
++            ea = u16::from_le_bytes([lo, hi]);
++        }
++        M_REL => ea = m.read(op1) as i8 as u16,
++        _ => {}
++    }
++
++    match kind {
++        ORA..=BIT => {
++            let v = if mode == M_IMM { m.read(op1) } else { m.get_byte(ea) };
++            match kind {
++                ORA => {
++                    a |= v;
++                    p = nz(p, a);
++                }
++                AND => {
++                    a &= v;
++                    p = nz(p, a);
++                }
++                EOR => {
++                    a ^= v;
++                    p = nz(p, a);
++                }
++                ADC | SBC => {
++                    // Binary mode only; SBC is ADC of the complement.
++                    let v = if kind == SBC { !v } else { v };
++                    let sum = a as u16 + v as u16 + (p & C) as u16;
++                    let r = sum as u8;
++                    let overflow = (!(a ^ v) & (a ^ r) & 0x80) != 0;
++                    p = nz(p & !(C | V), r) | (sum > 0xFF) as u8 | if overflow { V } else { 0 };
++                    a = r;
++                }
++                CMP | CPX | CPY => {
++                    let r = if kind == CMP { a } else if kind == CPX { x } else { y };
++                    p = nz(p & !C, r.wrapping_sub(v)) | (r >= v) as u8;
++                }
++                LDA => {
++                    a = v;
++                    p = nz(p, a);
++                }
++                LDX => {
++                    x = v;
++                    p = nz(p, x);
++                }
++                LDY => {
++                    y = v;
++                    p = nz(p, y);
++                }
++                _ => {
++                    // BIT
++                    p = (p & !(Z | V | N)) | (v & (N | V)) | if a & v == 0 { Z } else { 0 };
++                }
++            }
++            cycles += crossed as u32;
++        }
++        STA => m.write(ea, a),
++        STX => m.write(ea, x),
++        STY => m.write(ea, y),
++        ASL..=DEC => {
++            let v = if mode == M_ACC { a } else { m.get_byte(ea) };
++            let (r, carry) = match kind {
++                ASL => (v << 1, v >> 7),
++                LSR => (v >> 1, v & 1),
++                ROL => ((v << 1) | (p & C), v >> 7),
++                ROR => ((v >> 1) | ((p & C) << 7), v & 1),
++                INC => (v.wrapping_add(1), p & C),
++                _ => (v.wrapping_sub(1), p & C),
++            };
++            p = nz(p & !C, r) | carry;
++            if mode == M_ACC {
++                a = r;
++            } else {
++                m.write(ea, r);
++            }
++            cycles += crossed as u32;
++        }
++        BR => {
++            let set = p as u32 & param & 0xFF != 0;
++            if set == (param & 0x100 != 0) {
++                let target = next.wrapping_add(ea);
++                cycles += 1 + ((next ^ target) & 0xFF00 != 0) as u32;
++                next = target;
++            }
++        }
++        JMP => next = ea,
++        JSR => {
++            let ret = next.wrapping_sub(1);
++            m.write(0x0100 | s as u16, (ret >> 8) as u8);
++            s = s.wrapping_sub(1);
++            m.write(0x0100 | s as u16, ret as u8);
++            s = s.wrapping_sub(1);
++            next = ea;
++        }
++        RTS | RTI | PLA | PLP => {
++            s = s.wrapping_add(1);
++            let v = m.get_byte(0x0100 | s as u16);
++            match kind {
++                PLA => {
++                    a = v;
++                    p = nz(p, a);
++                }
++                PLP => p = v,
++                _ => {
++                    let lo = if kind == RTI {
++                        p = v;
++                        s = s.wrapping_add(1);
++                        m.get_byte(0x0100 | s as u16)
++                    } else {
++                        v
++                    };
++                    s = s.wrapping_add(1);
++                    let hi = m.get_byte(0x0100 | s as u16);
++                    next = u16::from_le_bytes([lo, hi]).wrapping_add((kind == RTS) as u16);
++                }
++            }
++        }
++        PHA | PHP => {
++            m.write(0x0100 | s as u16, if kind == PHA { a } else { p | 0x30 });
++            s = s.wrapping_sub(1);
++        }
++        CLF => p &= !(param as u8),
++        SEF => p |= param as u8,
++        TAX => {
++            x = a;
++            p = nz(p, x);
++        }
++        TAY => {
++            y = a;
++            p = nz(p, y);
++        }
++        TXA => {
++            a = x;
++            p = nz(p, a);
++        }
++        TYA => {
++            a = y;
++            p = nz(p, a);
++        }
++        TSX => {
++            x = s;
++            p = nz(p, x);
++        }
++        TXS => s = x,
++        INX => {
++            x = x.wrapping_add(1);
++            p = nz(p, x);
++        }
++        INY => {
++            y = y.wrapping_add(1);
++            p = nz(p, y);
++        }
++        DEX => {
++            x = x.wrapping_sub(1);
++            p = nz(p, x);
++        }
++        DEY => {
++            y = y.wrapping_sub(1);
++            p = nz(p, y);
++        }
++        _ => debug_assert_eq!(kind, NOP),
++    }
++
++    *r = Regs { a, x, y, s, p, pc: next };
++    Some(cycles)
 +}
 --- a/src/font.rs
 +++ b/src/font.rs
@@ -334,7 +875,7 @@
      /// Check if display has been updated
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -2,6 +2,24 @@
+@@ -2,11 +2,30 @@
  //!
  //! This crate implements a BBK A-series electronic dictionary game emulator.
  
@@ -359,6 +900,12 @@
  pub mod audio;
  pub mod cheat;
  pub mod cpu;
+ pub mod debug;
+ pub mod emulator;
++pub mod fast6502;
+ pub mod font_data;
+ pub mod gam;
+ pub mod input;
 --- a/src/memory.rs
 +++ b/src/memory.rs
 @@ -1,5 +1,8 @@
@@ -379,6 +926,117 @@
  enum FlashCmd {
      Normal,
      ByteProgram,
+@@ -215,7 +218,43 @@
+     }
+ 
+     /// Read a byte from memory
++    #[inline(always)]
+     pub fn read(&self, addr: u16) -> u8 {
++        // Fast paths for the hot regions; everything else goes through
++        // read_reference, which this must always agree with.
++        if addr >= 0x1000 {
++            let page = self.bank_switch.banks[(addr >> 12) as usize];
++            let off = (addr & 0x0FFF) as u32;
++            match page >> 9 {
++                0 if page < 8 => return self.ram[((page << 12) | off) as usize],
++                1 if matches!(self.flash_cmd, FlashCmd::Normal | FlashCmd::ByteProgram) => {
++                    let fa = ((page - 0x200) << 12) | off;
++                    // The save area (last 32 KiB) is rotated to the front.
++                    let fa = if fa >= FLASH_SIZE as u32 - 0x8000 { fa + 0x8000 - FLASH_SIZE as u32 } else { fa };
++                    return self.flash[fa as usize];
++                }
++                4 => {
++                    if let Some(rom) = &self.rom_8 {
++                        return rom[(((page - 0x800) << 12) | off) as usize];
++                    }
++                }
++                7 => {
++                    if let Some(rom) = &self.rom_e {
++                        return rom[(((page - 0xE00) << 12) | off) as usize];
++                    }
++                }
++                _ => {}
++            }
++        } else if addr >= 0x0400 || (0x0100..0x0300).contains(&addr) {
++            return self.ram[addr as usize];
++        }
++        self.read_reference(addr)
++    }
++
++    /// The original, unoptimized read.
++    #[inline(never)]
++    #[cold]
++    pub fn read_reference(&self, addr: u16) -> u8 {
+         match addr {
+             // Page 0 - hardware registers
+             0x0000..=0x00FF => self.read_page0(addr),
+@@ -233,7 +272,27 @@
+     }
+ 
+     /// Write a byte to memory
++    #[inline(always)]
+     pub fn write(&mut self, addr: u16, val: u8) {
++        // Fast path for plain RAM; everything else (registers, PB, flash
++        // commands, ROM) goes through write_reference.
++        if addr >= 0x1000 {
++            let page = self.bank_switch.banks[(addr >> 12) as usize];
++            if page < 8 {
++                self.ram[((page << 12) | (addr & 0x0FFF) as u32) as usize] = val;
++                return;
++            }
++        } else if addr >= 0x0400 || ((0x0100..0x0300).contains(&addr) && addr != registers::PB) {
++            self.ram[addr as usize] = val;
++            return;
++        }
++        self.write_reference(addr, val);
++    }
++
++    /// The original, unoptimized write.
++    #[inline(never)]
++    #[cold]
++    pub fn write_reference(&mut self, addr: u16, val: u8) {
+         match addr {
+             0x0000..=0x00FF => self.write_page0(addr, val),
+             0x0100..=0x02FF | 0x0400..=0x0FFF => {
+@@ -658,7 +717,24 @@
+ }
+ 
+ impl Bus for Memory {
++    #[inline(always)]
+     fn get_byte(&mut self, address: u16) -> u8 {
++        if address > registers::DATA4 {
++            return self.read(address);
++        }
++        self.get_data_byte(address)
++    }
++
++    fn set_byte(&mut self, address: u16, value: u8) {
++        self.write(address, value);
++    }
++}
++
++impl Memory {
++    /// get_byte for the auto-incrementing DATA registers.
++    #[inline(never)]
++    #[cold]
++    fn get_data_byte(&mut self, address: u16) -> u8 {
+         let value = self.read(address);
+         if (registers::DATA1..=registers::DATA4).contains(&address) {
+             let channel = (address - registers::DATA1) as usize;
+@@ -668,12 +744,9 @@
+         }
+         value
+     }
+-
+-    fn set_byte(&mut self, address: u16, value: u8) {
+-        self.write(address, value);
+-    }
+ }
+ 
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
 --- a/src/model.rs
 +++ b/src/model.rs
 @@ -1,5 +1,8 @@

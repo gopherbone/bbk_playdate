@@ -1,0 +1,15 @@
+[package]
+name = "difftest"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Checks the fast CPU and memory paths against mos6502 and the original memory code"
+
+[dependencies]
+bbkemu-core = { path = "../../gen/bbkemu-core" }
+mos6502 = { version = "0.10", default-features = false }
+
+[profile.release]
+debug = true
+
+[workspace]
