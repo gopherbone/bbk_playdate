@@ -1,0 +1,463 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,18 +1,10 @@
+ [package]
+ name = "bbkemu-core"
+-version.workspace = true
+-edition.workspace = true
+-license.workspace = true
+-description = "BBK electronic dictionary game emulator core"
++version = "0.1.0"
++edition = "2021"
++license = "GPL-3.0-or-later"
++description = "BBK electronic dictionary game emulator core (no_std build for Playdate)"
+ 
+ [dependencies]
+-mos6502 = { workspace = true }
+-serde = { workspace = true }
+-bincode = { workspace = true }
+-log = { workspace = true }
+-anyhow = { workspace = true }
+-thiserror = { workspace = true }
+-image = { workspace = true }
+-
+-[dev-dependencies]
+-cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy"] }
++mos6502 = { version = "0.10", default-features = false }
++log = { version = "0.4", default-features = false }
+--- a/src/audio.rs
++++ b/src/audio.rs
+@@ -1,5 +1,8 @@
+ //! Audio emulation
+ 
++#[allow(unused_imports)]
++use crate::prelude::*;
++
+ /// Audio channel state
+ pub struct AudioChannel {
+     /// Frequency in Hz
+--- a/src/cheat.rs
++++ b/src/cheat.rs
+@@ -1,7 +1,10 @@
+ //! Cheat engine for memory manipulation
+ 
+-use std::collections::HashMap;
++#[allow(unused_imports)]
++use crate::prelude::*;
+ 
++use alloc::collections::BTreeMap;
++
+ /// Cheat code entry
+ #[derive(Debug, Clone)]
+ pub struct CheatCode {
+@@ -18,7 +21,7 @@
+ /// Cheat engine that manages cheat codes
+ pub struct CheatEngine {
+     /// Active cheat codes indexed by ID
+-    cheats: HashMap<u32, CheatCode>,
++    cheats: BTreeMap<u32, CheatCode>,
+     /// Next cheat ID
+     next_id: u32,
+ }
+@@ -33,7 +36,7 @@
+     /// Create a new cheat engine
+     pub fn new() -> Self {
+         Self {
+-            cheats: HashMap::new(),
++            cheats: BTreeMap::new(),
+             next_id: 0,
+         }
+     }
+@@ -149,7 +152,7 @@
+     }
+ 
+     /// Get all cheats
+-    pub fn cheats(&self) -> &HashMap<u32, CheatCode> {
++    pub fn cheats(&self) -> &BTreeMap<u32, CheatCode> {
+         &self.cheats
+     }
+ 
+--- a/src/cpu.rs
++++ b/src/cpu.rs
+@@ -1,5 +1,8 @@
+ //! 6502 CPU wrapper using mos6502 crate
+ 
++#[allow(unused_imports)]
++use crate::prelude::*;
++
+ use mos6502::cpu::CPU;
+ use mos6502::instruction::Nmos6502;
+ 
+--- a/src/debug.rs
++++ b/src/debug.rs
+@@ -1,7 +1,10 @@
+ //! Debugger for development and ROM hacking
+ 
+-use std::collections::HashSet;
++#[allow(unused_imports)]
++use crate::prelude::*;
+ 
++use alloc::collections::BTreeSet;
++
+ /// Watchpoint type
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum WatchKind {
+@@ -38,7 +41,7 @@
+ /// Debugger
+ pub struct Debugger {
+     /// Breakpoint addresses
+-    breakpoints: HashSet<u16>,
++    breakpoints: BTreeSet<u16>,
+     /// Watchpoints
+     watchpoints: Vec<Watchpoint>,
+     /// Whether we're in single-step mode
+@@ -62,7 +65,7 @@
+ impl Debugger {
+     pub fn new() -> Self {
+         Self {
+-            breakpoints: HashSet::new(),
++            breakpoints: BTreeSet::new(),
+             watchpoints: Vec::new(),
+             stepping: false,
+             trace_log: Vec::new(),
+@@ -144,7 +147,7 @@
+     }
+ 
+     /// Get all breakpoints
+-    pub fn breakpoints(&self) -> &HashSet<u16> {
++    pub fn breakpoints(&self) -> &BTreeSet<u16> {
+         &self.breakpoints
+     }
+ }
+--- a/src/emulator.rs
++++ b/src/emulator.rs
+@@ -1,7 +1,10 @@
+ //! Main emulator orchestrator
+ 
+-use anyhow::Result;
++#[allow(unused_imports)]
++use crate::prelude::*;
+ 
++use crate::error::Result;
++
+ use crate::audio::Audio;
+ use crate::cheat::CheatEngine;
+ use crate::cpu::CpuWrapper;
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -0,0 +1,22 @@
++//! Minimal error type standing in for `anyhow` in `no_std` builds.
++
++use alloc::string::String;
++use core::fmt;
++
++#[derive(Debug)]
++pub struct Error(pub String);
++
++impl fmt::Display for Error {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(&self.0)
++    }
++}
++
++pub type Result<T> = core::result::Result<T, Error>;
++
++#[macro_export]
++macro_rules! bail {
++    ($($arg:tt)*) => {
++        return Err($crate::error::Error(alloc::format!($($arg)*)))
++    };
++}
+--- a/src/font.rs
++++ b/src/font.rs
+@@ -1,6 +1,9 @@
+ //! Built-in 8x8 bitmap font for BBK emulator
+ //! Covers ASCII characters 0x20-0x7E
+ 
++#[allow(unused_imports)]
++use crate::prelude::*;
++
+ /// Built-in font data (8x8 pixels per character)
+ /// Each character is 8 bytes, one byte per row, MSB first
+ pub const FONT_DATA: &[u8; 768] = include_bytes!("font.bin");
+--- a/src/gam.rs
++++ b/src/gam.rs
+@@ -1,7 +1,11 @@
+ //! GAM file loader and parser
+ 
+-use anyhow::{bail, Result};
++#[allow(unused_imports)]
++use crate::prelude::*;
+ 
++use crate::bail;
++use crate::error::Result;
++
+ /// Maximum GAM file size (1920 KiB)
+ const MAX_GAM_SIZE: usize = 0x1E0000;
+ 
+--- a/src/input.rs
++++ b/src/input.rs
+@@ -1,7 +1,10 @@
+ //! Keyboard input handling
+ 
+-use std::collections::VecDeque;
++#[allow(unused_imports)]
++use crate::prelude::*;
+ 
++use alloc::collections::VecDeque;
++
+ /// BBK key codes
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ #[repr(u8)]
+@@ -72,13 +75,13 @@
+     /// Convert from raw key code
+     pub fn from_code(code: u8) -> Option<Self> {
+         match code {
+-            0x00..=0x07 => Some(unsafe { std::mem::transmute::<u8, BbkKey>(code) }),
+-            0x08..=0x0F => Some(unsafe { std::mem::transmute::<u8, BbkKey>(code) }),
+-            0x10..=0x17 => Some(unsafe { std::mem::transmute::<u8, BbkKey>(code) }),
+-            0x18..=0x1F => Some(unsafe { std::mem::transmute::<u8, BbkKey>(code) }),
+-            0x20..=0x27 => Some(unsafe { std::mem::transmute::<u8, BbkKey>(code) }),
+-            0x28..=0x2F => Some(unsafe { std::mem::transmute::<u8, BbkKey>(code) }),
+-            0x30..=0x3B => Some(unsafe { std::mem::transmute::<u8, BbkKey>(code) }),
++            0x00..=0x07 => Some(unsafe { core::mem::transmute::<u8, BbkKey>(code) }),
++            0x08..=0x0F => Some(unsafe { core::mem::transmute::<u8, BbkKey>(code) }),
++            0x10..=0x17 => Some(unsafe { core::mem::transmute::<u8, BbkKey>(code) }),
++            0x18..=0x1F => Some(unsafe { core::mem::transmute::<u8, BbkKey>(code) }),
++            0x20..=0x27 => Some(unsafe { core::mem::transmute::<u8, BbkKey>(code) }),
++            0x28..=0x2F => Some(unsafe { core::mem::transmute::<u8, BbkKey>(code) }),
++            0x30..=0x3B => Some(unsafe { core::mem::transmute::<u8, BbkKey>(code) }),
+             _ => None,
+         }
+     }
+--- a/src/lcd.rs
++++ b/src/lcd.rs
+@@ -1,5 +1,8 @@
+ //! LCD display emulation (159x96 monochrome)
+ 
++#[allow(unused_imports)]
++use crate::prelude::*;
++
+ pub const LCD_WIDTH: usize = 159;
+ pub const LCD_HEIGHT: usize = 96;
+ pub const FRAMEBUFFER_SIZE: usize = LCD_WIDTH * LCD_HEIGHT;
+@@ -68,15 +71,9 @@
+     ///
+     /// Ensures each RGB channel of the background is at least 18 units
+     /// brighter than the foreground, matching the hardware LCD behavior.
+-    pub fn random() -> Self {
+-        use std::time::{SystemTime, UNIX_EPOCH};
+-        let seed = SystemTime::now()
+-            .duration_since(UNIX_EPOCH)
+-            .unwrap_or_default()
+-            .as_nanos();
+-
+-        // Simple LCG seeded from system time
+-        let mut state = seed as u64;
++    pub fn random(seed: u64) -> Self {
++        // Simple LCG; no_std has no clock, so the caller supplies the seed
++        let mut state = seed;
+         let mut next = || {
+             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+             ((state >> 33) & 0xFFFF) as u16
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2,6 +2,24 @@
+ //!
+ //! This crate implements a BBK A-series electronic dictionary game emulator.
+ 
++#![no_std]
++
++extern crate alloc;
++
++pub mod error;
++
++mod prelude {
++    #[allow(unused_imports)]
++    pub use alloc::{
++        borrow::ToOwned,
++        boxed::Box,
++        format,
++        string::{String, ToString},
++        vec,
++        vec::Vec,
++    };
++}
++
+ pub mod audio;
+ pub mod cheat;
+ pub mod cpu;
+--- a/src/memory.rs
++++ b/src/memory.rs
+@@ -1,5 +1,8 @@
+ //! Memory bus with bank switching and hardware register handling
+ 
++#[allow(unused_imports)]
++use crate::prelude::*;
++
+ use mos6502::memory::Bus;
+ 
+ /// Physical memory map constants
+@@ -136,7 +139,7 @@
+ }
+ 
+ /// Flash command state
+-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
++#[derive(Clone, Copy, PartialEq)]
+ enum FlashCmd {
+     Normal,
+     ByteProgram,
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -1,5 +1,8 @@
+ //! BBK model definitions
+ 
++#[allow(unused_imports)]
++use crate::prelude::*;
++
+ /// BBK electronic dictionary model configuration
+ pub struct BbkModel {
+     /// Model name (e.g., "A4980", "A4988")
+--- a/src/save.rs
++++ b/src/save.rs
+@@ -1,10 +1,12 @@
+ //! Save state and SRAM management
+ 
+-use anyhow::Result;
+-use serde::{Deserialize, Serialize};
++#[allow(unused_imports)]
++use crate::prelude::*;
+ 
++use crate::error::Result;
++use crate::bail;
++
+ /// Save state data
+-#[derive(Serialize, Deserialize)]
+ pub struct SaveState {
+     /// RAM contents (use Vec for serde compatibility)
+     pub ram: Vec<u8>,
+@@ -23,7 +25,6 @@
+ }
+ 
+ /// CPU state for serialization
+-#[derive(Serialize, Deserialize)]
+ pub struct CpuState {
+     pub pc: u16,
+     pub sp: u8,
+@@ -35,20 +36,113 @@
+ }
+ 
+ /// Bank switch state for serialization
+-#[derive(Serialize, Deserialize)]
+ pub struct BankState {
+     pub banks: Vec<u32>,
+     pub selected: u8,
+ }
+ 
++// Encoded by hand in bincode 1's default layout (little endian, fixed-width
++// integers, u64 length prefixes) so states stay interchangeable with std builds.
+ impl SaveState {
+     /// Serialize to bytes
+     pub fn to_bytes(&self) -> Vec<u8> {
+-        bincode::serialize(self).unwrap_or_default()
++        let mut out = Vec::with_capacity(self.ram.len() + self.flash.len() + 64);
++        put_bytes(&mut out, &self.ram);
++        put_bytes(&mut out, &self.flash);
++        out.extend_from_slice(&self.cpu.pc.to_le_bytes());
++        out.extend_from_slice(&[self.cpu.sp, self.cpu.a, self.cpu.x, self.cpu.y, self.cpu.status]);
++        out.extend_from_slice(&self.cpu.cycles.to_le_bytes());
++        out.extend_from_slice(&(self.bank_switch.banks.len() as u64).to_le_bytes());
++        for bank in &self.bank_switch.banks {
++            out.extend_from_slice(&bank.to_le_bytes());
++        }
++        out.push(self.bank_switch.selected);
++        out.extend_from_slice(&self.bank_sys_d.to_le_bytes());
++        out.push(self.flash_cmd);
++        out.push(self.flash_cycles);
++        out
+     }
+ 
+     /// Deserialize from bytes
+     pub fn from_bytes(data: &[u8]) -> Result<Self> {
+-        Ok(bincode::deserialize(data)?)
++        let mut r = Reader(data);
++        let ram = r.bytes()?;
++        let flash = r.bytes()?;
++        let cpu = CpuState {
++            pc: r.u16()?,
++            sp: r.u8()?,
++            a: r.u8()?,
++            x: r.u8()?,
++            y: r.u8()?,
++            status: r.u8()?,
++            cycles: r.u64()?,
++        };
++        let count = r.len()?;
++        let mut banks = Vec::with_capacity(count.min(64));
++        for _ in 0..count {
++            banks.push(r.u32()?);
++        }
++        let bank_switch = BankState {
++            banks,
++            selected: r.u8()?,
++        };
++        Ok(Self {
++            ram,
++            flash,
++            cpu,
++            bank_switch,
++            bank_sys_d: r.u16()?,
++            flash_cmd: r.u8()?,
++            flash_cycles: r.u8()?,
++        })
+     }
+ }
++
++fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
++    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
++    out.extend_from_slice(bytes);
++}
++
++struct Reader<'a>(&'a [u8]);
++
++impl Reader<'_> {
++    fn take<const N: usize>(&mut self) -> Result<[u8; N]> {
++        if self.0.len() < N {
++            bail!("save state is truncated");
++        }
++        let (head, rest) = self.0.split_at(N);
++        self.0 = rest;
++        Ok(head.try_into().unwrap())
++    }
++
++    fn u8(&mut self) -> Result<u8> {
++        Ok(self.take::<1>()?[0])
++    }
++
++    fn u16(&mut self) -> Result<u16> {
++        Ok(u16::from_le_bytes(self.take()?))
++    }
++
++    fn u32(&mut self) -> Result<u32> {
++        Ok(u32::from_le_bytes(self.take()?))
++    }
++
++    fn u64(&mut self) -> Result<u64> {
++        Ok(u64::from_le_bytes(self.take()?))
++    }
++
++    fn len(&mut self) -> Result<usize> {
++        let n = self.u64()?;
++        if n > self.0.len() as u64 {
++            bail!("save state is truncated");
++        }
++        Ok(n as usize)
++    }
++
++    fn bytes(&mut self) -> Result<Vec<u8>> {
++        let n = self.len()?;
++        let (head, rest) = self.0.split_at(n);
++        self.0 = rest;
++        Ok(head.to_vec())
++    }
++}

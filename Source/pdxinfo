@@ -1,0 +1,6 @@
+name=BBKEmu
+author=gopherbone
+description=BBK A4980/A4988 electronic dictionary game emulator
+bundleID=com.gopherbone.bbkemu
+version=0.1.0
+buildNumber=1

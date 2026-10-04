@@ -1,0 +1,5 @@
+build/
+gen/
+rust/target/
+BBKEmu.pdx/
+Source/pdex.*

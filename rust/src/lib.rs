@@ -1,0 +1,505 @@
+//! C ABI over a `no_std` `bbkemu-core` for the Playdate frontend.
+//!
+//! See `../include/bbkemu_pd.h` for the contract. The crate allocates through
+//! the C heap (which the SDK routes to `playdate->system->realloc`) and panics
+//! by reporting through `bbk_pd_panic`, which never returns.
+
+#![no_std]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::alloc::{GlobalAlloc, Layout};
+use core::ffi::{c_char, c_void};
+use core::fmt::{self, Write};
+use core::{ptr, slice};
+
+use bbkemu_core::input::BbkKey;
+use bbkemu_core::lcd::{LCD_HEIGHT, LCD_WIDTH};
+use bbkemu_core::model::{MODEL_4980, MODEL_4988};
+use bbkemu_core::save::SaveState;
+use bbkemu_core::Emulator;
+use mos6502::registers::Status;
+
+const PIXELS: usize = LCD_WIDTH * LCD_HEIGHT;
+const BATTERY_MAGIC: &[u8; 8] = b"BBKBAT1\0";
+
+extern "C" {
+    fn malloc(size: usize) -> *mut c_void;
+    fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
+    fn free(ptr: *mut c_void);
+    fn bbk_pd_panic(message: *const c_char);
+}
+
+// MARK: Runtime
+
+/// Alignment the C heap guarantees: newlib on device promises 8, but stay
+/// conservative there; macOS (Simulator) gives 16.
+const MIN_ALIGN: usize = if cfg!(target_pointer_width = "32") { 4 } else { 16 };
+
+struct CHeap;
+
+unsafe impl GlobalAlloc for CHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if layout.align() <= MIN_ALIGN {
+            return malloc(layout.size()) as *mut u8;
+        }
+        // Over-allocate and stash the original pointer just below the aligned block.
+        let raw = malloc(layout.size() + layout.align()) as *mut u8;
+        if raw.is_null() {
+            return raw;
+        }
+        let aligned = (raw as usize + layout.align()) & !(layout.align() - 1);
+        let aligned = aligned as *mut u8;
+        (aligned as *mut *mut u8).sub(1).write_unaligned(raw);
+        aligned
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if layout.align() <= MIN_ALIGN {
+            free(ptr as *mut c_void);
+        } else {
+            free((ptr as *mut *mut u8).sub(1).read_unaligned() as *mut c_void);
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if layout.align() <= MIN_ALIGN {
+            return realloc(ptr as *mut c_void, new_size) as *mut u8;
+        }
+        let new = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
+        if !new.is_null() {
+            ptr::copy_nonoverlapping(ptr, new, layout.size().min(new_size));
+            self.dealloc(ptr, layout);
+        }
+        new
+    }
+}
+
+#[global_allocator]
+static HEAP: CHeap = CHeap;
+
+/// Fixed buffer for formatting panic messages without allocating.
+struct MessageBuf {
+    buf: [u8; 256],
+    len: usize,
+}
+
+impl Write for MessageBuf {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let room = self.buf.len() - 1 - self.len;
+        let n = s.len().min(room);
+        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        Ok(())
+    }
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let mut msg = MessageBuf { buf: [0; 256], len: 0 };
+    let _ = write!(msg, "BBKEmu core panic: {}", info.message());
+    if let Some(loc) = info.location() {
+        let _ = write!(msg, " ({}:{})", loc.file(), loc.line());
+    }
+    msg.buf[msg.len] = 0;
+    unsafe { bbk_pd_panic(msg.buf.as_ptr() as *const c_char) };
+    loop {}
+}
+
+/// The Simulator links against the host's prebuilt `core`, which references
+/// an unwinding personality even though this crate aborts on panic.
+#[cfg(not(target_os = "none"))]
+#[no_mangle]
+pub extern "C" fn rust_eh_personality() {}
+
+// MARK: Emulator handle
+
+pub struct BBKEmulator {
+    emu: Emulator,
+    /// Flash contents right after the game was loaded; battery saves are
+    /// stored as a diff against this so patched .gam files stay intact.
+    pristine_flash: Vec<u8>,
+    /// Per-pixel darkness, 0 (clear) to 255 (fully on), for ghosting.
+    intensity: Vec<u8>,
+    /// Backing store for the last `bbk_battery_export` / `bbk_state_save`.
+    export: Vec<u8>,
+}
+
+unsafe fn emu_mut<'a>(emu: *mut BBKEmulator) -> Option<&'a mut BBKEmulator> {
+    emu.as_mut()
+}
+
+unsafe fn bytes<'a>(data: *const u8, len: usize) -> &'a [u8] {
+    if data.is_null() || len == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(data, len)
+    }
+}
+
+/// Hands `data` back to C through an internal buffer valid until the next export.
+unsafe fn export(e: &mut BBKEmulator, data: Vec<u8>, len: *mut usize) -> *const u8 {
+    e.export = data;
+    if !len.is_null() {
+        *len = e.export.len();
+    }
+    e.export.as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn bbk_create(model: u32) -> *mut BBKEmulator {
+    let model = if model == 1 { &MODEL_4988 } else { &MODEL_4980 };
+    Box::into_raw(Box::new(BBKEmulator {
+        emu: Emulator::new(model),
+        pristine_flash: Vec::new(),
+        intensity: vec![0; PIXELS],
+        export: Vec::new(),
+    }))
+}
+
+/// # Safety
+/// `emu` must come from `bbk_create` and not be used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_destroy(emu: *mut BBKEmulator) {
+    if !emu.is_null() {
+        drop(Box::from_raw(emu));
+    }
+}
+
+/// # Safety
+/// `data` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_load_rom8(emu: *mut BBKEmulator, data: *const u8, len: usize) {
+    if let Some(e) = emu_mut(emu) {
+        e.emu.load_rom_8(bytes(data, len));
+    }
+}
+
+/// # Safety
+/// `data` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_load_rome(emu: *mut BBKEmulator, data: *const u8, len: usize) {
+    if let Some(e) = emu_mut(emu) {
+        e.emu.load_rom_e(bytes(data, len));
+    }
+}
+
+/// # Safety
+/// `data` must point to `len` readable bytes; `err` to `err_len` writable bytes or be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_load_game(
+    emu: *mut BBKEmulator,
+    data: *const u8,
+    len: usize,
+    err: *mut c_char,
+    err_len: usize,
+) -> bool {
+    let Some(e) = emu_mut(emu) else { return false };
+    match e.emu.load_gam(bytes(data, len)) {
+        Ok(()) => {
+            e.pristine_flash = e.emu.cpu.memory().flash.clone();
+            true
+        }
+        Err(error) => {
+            if !err.is_null() && err_len > 0 {
+                let message = error.0.as_bytes();
+                let n = message.len().min(err_len - 1);
+                ptr::copy_nonoverlapping(message.as_ptr(), err as *mut u8, n);
+                *err.add(n) = 0;
+            }
+            false
+        }
+    }
+}
+
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_run_frame(emu: *mut BBKEmulator) {
+    if let Some(e) = emu_mut(emu) {
+        e.emu.run_frame();
+    }
+}
+
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_is_running(emu: *const BBKEmulator) -> bool {
+    emu.as_ref().is_some_and(|e| e.emu.is_running())
+}
+
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_key_down(emu: *mut BBKEmulator, code: u8) {
+    if let (Some(e), Some(key)) = (emu_mut(emu), BbkKey::from_code(code)) {
+        e.emu.key_down(key);
+    }
+}
+
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_key_up(emu: *mut BBKEmulator) {
+    if let Some(e) = emu_mut(emu) {
+        e.emu.key_up();
+    }
+}
+
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_set_cpu_rate(emu: *mut BBKEmulator, rate: f32) {
+    if let Some(e) = emu_mut(emu) {
+        e.emu.set_cpu_rate(rate);
+    }
+}
+
+// MARK: Rendering
+
+/// 4x4 ordered-dither thresholds, used to show ghosting on the 1-bit screen.
+const BAYER4: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+
+/// Renders the LCD into a 1-bit frame buffer (MSB first, 1 = white).
+///
+/// Portrait draws 2x (318x192); landscape rotates clockwise and draws 1.5x
+/// (144x238). `x0` must be a multiple of 8. `ghosting` is how much of the
+/// previous frame persists, 0-242 out of 256. Returns the changed row range
+/// through `first_row`/`last_row` (first > last when nothing changed).
+///
+/// # Safety
+/// `frame` must cover every row and byte the image touches at `rowbytes` stride.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_render(
+    emu: *mut BBKEmulator,
+    frame: *mut u8,
+    rowbytes: usize,
+    x0: u32,
+    y0: u32,
+    landscape: bool,
+    ghosting: u8,
+    first_row: *mut i32,
+    last_row: *mut i32,
+) {
+    let Some(e) = emu_mut(emu) else { return };
+    if frame.is_null() {
+        return;
+    }
+    let pixels = e.emu.render_lcd_buffer();
+    let keep = ghosting.min(242) as i32;
+    for (level, &on) in e.intensity.iter_mut().zip(pixels.iter()) {
+        let target = if on { 255 } else { 0 };
+        *level = (target + (((*level as i32 - target) * keep) >> 8)) as u8;
+    }
+
+    // Source index = row_term[r] + col_term[c] for each output pixel.
+    let (width, height) = if landscape { (144, 238) } else { (318, 192) };
+    let mut col_term = [0u16; 318];
+    let mut row_term = [0u16; 238];
+    for c in 0..width {
+        col_term[c] = if landscape {
+            ((LCD_HEIGHT - 1 - c * 2 / 3) * LCD_WIDTH) as u16
+        } else {
+            (c / 2) as u16
+        };
+    }
+    for r in 0..height {
+        row_term[r] = if landscape {
+            (r * 2 / 3) as u16
+        } else {
+            (r / 2 * LCD_WIDTH) as u16
+        };
+    }
+
+    let mut first = i32::MAX;
+    let mut last = i32::MIN;
+    let x_byte = (x0 / 8) as usize;
+    for r in 0..height {
+        let y = y0 as usize + r;
+        let row = slice::from_raw_parts_mut(frame.add(y * rowbytes + x_byte), width.div_ceil(8));
+        let base = row_term[r] as usize;
+        let dither = &BAYER4[(r & 3) * 4..(r & 3) * 4 + 4];
+        let mut changed = false;
+        let mut bits = 0u8;
+        for c in 0..width {
+            let level = e.intensity[base + col_term[c] as usize];
+            let white = level <= dither[c & 3] * 16 + 8;
+            bits = (bits << 1) | white as u8;
+            if c & 7 == 7 {
+                changed |= row[c / 8] != bits;
+                row[c / 8] = bits;
+            }
+        }
+        let tail = width & 7;
+        if tail != 0 {
+            let shift = 8 - tail;
+            let mask = 0xFFu8 << shift;
+            let byte = &mut row[width / 8];
+            let merged = (*byte & !mask) | (bits << shift);
+            changed |= *byte != merged;
+            *byte = merged;
+        }
+        if changed {
+            first = first.min(y as i32);
+            last = last.max(y as i32);
+        }
+    }
+    if !first_row.is_null() {
+        *first_row = first;
+    }
+    if !last_row.is_null() {
+        *last_row = last;
+    }
+}
+
+/// Forgets ghosting history so the next frame draws crisp.
+///
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_reset_ghosting(emu: *mut BBKEmulator) {
+    if let Some(e) = emu_mut(emu) {
+        e.intensity.fill(0);
+    }
+}
+
+// MARK: Saves
+
+/// Diff of the current flash against the post-load snapshot, as
+/// `MAGIC, then repeated [u32 offset][u32 len][bytes]` (little endian).
+/// Same format as the macOS app's battery saves.
+fn battery_diff(e: &BBKEmulator) -> Vec<u8> {
+    let flash = &e.emu.cpu.memory().flash;
+    let base = &e.pristine_flash;
+    let mut out = BATTERY_MAGIC.to_vec();
+    if base.len() != flash.len() {
+        return out;
+    }
+    let mut i = 0;
+    while i < flash.len() {
+        if flash[i] == base[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        // Merge runs separated by short equal gaps to keep the record count low.
+        let mut end = i + 1;
+        let mut gap = 0;
+        let mut j = end;
+        while j < flash.len() && gap < 16 {
+            if flash[j] != base[j] {
+                end = j + 1;
+                gap = 0;
+            } else {
+                gap += 1;
+            }
+            j += 1;
+        }
+        out.extend_from_slice(&(start as u32).to_le_bytes());
+        out.extend_from_slice(&((end - start) as u32).to_le_bytes());
+        out.extend_from_slice(&flash[start..end]);
+        i = end;
+    }
+    out
+}
+
+/// Returns the battery save; the pointer stays valid until the next export.
+///
+/// # Safety
+/// `len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_battery_export(emu: *mut BBKEmulator, len: *mut usize) -> *const u8 {
+    let Some(e) = emu_mut(emu) else { return ptr::null() };
+    if e.pristine_flash.is_empty() {
+        return ptr::null();
+    }
+    let diff = battery_diff(e);
+    export(e, diff, len)
+}
+
+/// # Safety
+/// `data` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_battery_import(emu: *mut BBKEmulator, data: *const u8, len: usize) -> bool {
+    let Some(e) = emu_mut(emu) else { return false };
+    let data = bytes(data, len);
+    if data.len() < 8 || &data[..8] != BATTERY_MAGIC {
+        return false;
+    }
+    // Validate the whole file before touching flash.
+    let flash_len = e.emu.cpu.memory().flash.len();
+    let mut records = Vec::new();
+    let mut p = 8;
+    while p < data.len() {
+        if p + 8 > data.len() {
+            return false;
+        }
+        let off = u32::from_le_bytes(data[p..p + 4].try_into().unwrap()) as usize;
+        let n = u32::from_le_bytes(data[p + 4..p + 8].try_into().unwrap()) as usize;
+        p += 8;
+        if p + n > data.len() || off + n > flash_len {
+            return false;
+        }
+        records.push((off, &data[p..p + n]));
+        p += n;
+    }
+    let flash = &mut e.emu.cpu.memory_mut().flash;
+    for (off, chunk) in records {
+        flash[off..off + chunk.len()].copy_from_slice(chunk);
+    }
+    true
+}
+
+/// Returns a save state in upstream's `SaveState` format (the same bytes the
+/// macOS app and libretro core write); valid until the next export.
+///
+/// # Safety
+/// `len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_state_save(emu: *mut BBKEmulator, len: *mut usize) -> *const u8 {
+    let Some(e) = emu_mut(emu) else { return ptr::null() };
+    let state = e.emu.save_state().to_bytes();
+    export(e, state, len)
+}
+
+/// # Safety
+/// `data` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_state_load(emu: *mut BBKEmulator, data: *const u8, len: usize) -> bool {
+    let Some(e) = emu_mut(emu) else { return false };
+    let Ok(state) = SaveState::from_bytes(bytes(data, len)) else { return false };
+    if state.bank_sys_d != e.emu.model().bank_sys_d || state.ram.len() != e.emu.cpu.memory().ram.len() {
+        return false;
+    }
+    if e.emu.load_save_state(&state).is_err() {
+        return false;
+    }
+    // Upstream only restores PC/SP; restore the rest of the CPU and the
+    // bank mapping so states taken mid-routine resume correctly.
+    let regs = &mut e.emu.cpu.inner.registers;
+    regs.accumulator = state.cpu.a;
+    regs.index_x = state.cpu.x;
+    regs.index_y = state.cpu.y;
+    regs.status = Status::from_bits_truncate(state.cpu.status);
+    let banks = &mut e.emu.cpu.memory_mut().bank_switch;
+    for (dst, &src) in banks.banks.iter_mut().zip(state.bank_switch.banks.iter()) {
+        *dst = src;
+    }
+    banks.set_selected(state.bank_switch.selected);
+    e.intensity.fill(0);
+    true
+}
+
+/// Frees the buffer behind the last export.
+///
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_release_export(emu: *mut BBKEmulator) {
+    if let Some(e) = emu_mut(emu) {
+        e.export = Vec::new();
+    }
+}
