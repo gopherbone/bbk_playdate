@@ -469,9 +469,14 @@ static void start_game(const char* name) {
         return;
     }
 
+    // A copy in the Data folder's Games wins over one bundled in the pdx.
     snprintf(path, sizeof path, "Games/%s.gam", game_name);
     size_t game_len;
     uint8_t* game = read_file(path, &game_len);
+    if (!game) {
+        snprintf(path, sizeof path, "Bundled/%s.gam", game_name);
+        game = read_file(path, &game_len);
+    }
     if (!game) {
         show_message("Couldn't open game", path, SCREEN_PICKER);
         return;
@@ -921,6 +926,8 @@ static void collect_game(const char* path, void* ud) {
     (void)ud;
     size_t len = strlen(path);
     if (game_count >= MAX_GAMES || path[0] == '.' || !has_gam_ext(path, len)) return;
+    for (int i = 0; i < game_count; i++)
+        if (strlen(games[i]) == len - 4 && !memcmp(games[i], path, len - 4)) return;
     char* name = pd->system->realloc(NULL, len - 3);
     memcpy(name, path, len - 4);
     name[len - 4] = 0;
@@ -937,7 +944,10 @@ static int compare_names(const void* a, const void* b) {
 static void scan_games(void) {
     for (int i = 0; i < game_count; i++) free_buf(games[i]);
     game_count = 0;
+    // Games/ in the Data folder hides the pdx's own Games/, so bundled games live
+    // in Bundled/, which only exists in the pdx.
     pd->file->listfiles("Games", collect_game, NULL, 0);
+    pd->file->listfiles("Bundled", collect_game, NULL, 0);
     qsort(games, game_count, sizeof games[0], compare_names);
     if (picker_selected >= game_count) picker_selected = game_count ? game_count - 1 : 0;
 }
