@@ -782,7 +782,7 @@ static void option_label(int i, char* out, size_t cap) {
     case OPT_SLOT: snprintf(out, cap, "State slot\t%d", config.slot); break;
     case OPT_DISPLAY: snprintf(out, cap, "Display\t%s", config.landscape ? "Landscape" : "Portrait"); break;
     case OPT_GHOSTING: snprintf(out, cap, "LCD ghosting\t%s", ghost_names[settings.ghosting]); break;
-    case OPT_MODEL: snprintf(out, cap, "Model (Ⓐ switches, restarts)\t%s", model_name(config.model)); break;
+    case OPT_MODEL: snprintf(out, cap, "Model (A switches, restarts)\t%s", model_name(config.model)); break;
     case OPT_SPEED: snprintf(out, cap, "Show performance\t%s", settings.show_speed ? "On" : "Off"); break;
     case OPT_RESET: snprintf(out, cap, "Reset game"); break;
     case OPT_QUIT: snprintf(out, cap, "Back to game list"); break;

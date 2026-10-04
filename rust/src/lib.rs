@@ -122,6 +122,8 @@ pub struct BBKEmulator {
     /// Flash contents right after the game was loaded; battery saves are
     /// stored as a diff against this so patched .gam files stay intact.
     pristine_flash: Vec<u8>,
+    /// Decoded LCD, kept on the heap: the Playdate's game stack is small.
+    pixels: Box<[bool; PIXELS]>,
     /// Per-pixel darkness, 0 (clear) to 255 (fully on), for ghosting.
     intensity: Vec<u8>,
     /// Backing store for the last `bbk_battery_export` / `bbk_state_save`.
@@ -155,6 +157,7 @@ pub extern "C" fn bbk_create(model: u32) -> *mut BBKEmulator {
     Box::into_raw(Box::new(BBKEmulator {
         emu: Emulator::new(model),
         pristine_flash: Vec::new(),
+        pixels: vec![false; PIXELS].into_boxed_slice().try_into().unwrap(),
         intensity: vec![0; PIXELS],
         export: Vec::new(),
     }))
@@ -288,9 +291,9 @@ pub unsafe extern "C" fn bbk_render(
     if frame.is_null() {
         return;
     }
-    let pixels = e.emu.render_lcd_buffer();
+    e.emu.render_lcd_into(&mut e.pixels);
     let keep = ghosting.min(242) as i32;
-    for (level, &on) in e.intensity.iter_mut().zip(pixels.iter()) {
+    for (level, &on) in e.intensity.iter_mut().zip(e.pixels.iter()) {
         let target = if on { 255 } else { 0 };
         *level = (target + (((*level as i32 - target) * keep) >> 8)) as u8;
     }

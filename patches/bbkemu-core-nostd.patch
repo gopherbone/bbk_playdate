@@ -143,6 +143,43 @@
  use crate::audio::Audio;
  use crate::cheat::CheatEngine;
  use crate::cpu::CpuWrapper;
+@@ -533,7 +536,12 @@
+     /// Render LCD to boolean buffer (true = foreground, false = background)
+     pub fn render_lcd_buffer(&mut self) -> [bool; 159 * 96] {
+         let mut pixels = [false; 159 * 96];
++        self.render_lcd_into(&mut pixels);
++        pixels
++    }
+ 
++    /// Renders the LCD into a caller-owned buffer, for callers with little stack.
++    pub fn render_lcd_into(&mut self, pixels: &mut [bool; 159 * 96]) {
+         self.cpu.memory_mut().ram[0x400] = self.cpu.memory().ram[0x1000];
+         let ram = &self.cpu.memory().ram;
+         let mut v = 0x400;
+@@ -541,7 +549,7 @@
+         for j in (-30i32..=65).rev() {
+             let y = if j >= 0 { j } else { -j + 65 } as usize;
+             for i in 1..20 {
+-                decode_lcd_byte(&mut pixels, y, i * 8, ram[v]);
++                decode_lcd_byte(pixels, y, i * 8, ram[v]);
+                 v += 1;
+             }
+             v += 13;
+@@ -550,12 +558,10 @@
+         v = 0x413;
+         for j in (-30i32..=64).rev() {
+             let y = if j >= 0 { j } else { -j + 65 } as usize;
+-            decode_lcd_byte(&mut pixels, y, 0, ram[v]);
++            decode_lcd_byte(pixels, y, 0, ram[v]);
+             v += 32;
+         }
+-        decode_lcd_byte(&mut pixels, 65, 0, ram[0x0ff3]);
+-
+-        pixels
++        decode_lcd_byte(pixels, 65, 0, ram[0x0ff3]);
+     }
+ 
+     /// Render LCD to RGB565 buffer
 --- a/src/error.rs
 +++ b/src/error.rs
 @@ -0,0 +1,22 @@
@@ -260,6 +297,41 @@
          let mut next = || {
              state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
              ((state >> 33) & 0xFFFF) as u16
+@@ -104,10 +101,11 @@
+ 
+ /// LCD framebuffer
+ pub struct Lcd {
+-    /// Pixel buffer (true = foreground, false = background)
+-    pixels: [bool; FRAMEBUFFER_SIZE],
++    /// Pixel buffer (true = foreground, false = background). Heap-allocated:
++    /// inline arrays would put 30 KB on the stack whenever an Emulator is built.
++    pixels: Box<[bool]>,
+     /// Ghosting effect accumulator
+-    ghosting: [i8; FRAMEBUFFER_SIZE],
++    ghosting: Box<[i8]>,
+     /// Cursor X position
+     cursor_x: u8,
+     /// Cursor Y position
+@@ -125,8 +123,8 @@
+ impl Lcd {
+     pub fn new() -> Self {
+         Self {
+-            pixels: [false; FRAMEBUFFER_SIZE],
+-            ghosting: [0; FRAMEBUFFER_SIZE],
++            pixels: vec![false; FRAMEBUFFER_SIZE].into_boxed_slice(),
++            ghosting: vec![0; FRAMEBUFFER_SIZE].into_boxed_slice(),
+             cursor_x: 0,
+             cursor_y: 0,
+             dirty: true,
+@@ -276,7 +274,7 @@
+ 
+     /// Get pixel buffer reference
+     pub fn pixels(&self) -> &[bool; FRAMEBUFFER_SIZE] {
+-        &self.pixels
++        (&*self.pixels).try_into().unwrap()
+     }
+ 
+     /// Check if display has been updated
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -2,6 +2,24 @@
