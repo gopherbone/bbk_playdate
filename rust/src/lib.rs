@@ -292,6 +292,40 @@ pub unsafe extern "C" fn bbk_set_cpu_rate(emu: *mut BBKEmulator, rate: f32) {
     }
 }
 
+// MARK: Benchmarks
+
+/// Device microbenchmark: runs a small 6502 loop. `mode` 0 calls the fast path
+/// directly `count` times; mode 1 runs `count` frames of the emulator's frame
+/// loop over the same program. Returns the number of instructions executed.
+#[doc(hidden)]
+#[no_mangle]
+pub extern "C" fn bbk_bench_interpreter(mode: u32, count: u32) -> u32 {
+    use bbkemu_core::fast6502::{step, Regs};
+    // loop: LDA $10; CLC; ADC #1; STA $10; INX; BNE loop; JMP loop
+    const PROGRAM: [u8; 13] = [0xA5, 0x10, 0x18, 0x69, 0x01, 0x85, 0x10, 0xE8, 0xD0, 0xF6, 0x4C, 0x00, 0x04];
+    let mut emu = Box::new(Emulator::new(&MODEL_4980));
+    let m = emu.cpu.memory_mut();
+    m.init();
+    m.ram[0x400..0x400 + PROGRAM.len()].copy_from_slice(&PROGRAM);
+    m.ram[0x200] = 0; // not halted
+    let mut r = Regs { a: 0, x: 0, y: 0, s: 0xFF, p: 0x24, pc: 0x0400 }; // interrupts disabled
+    if mode == 0 {
+        let m = emu.cpu.memory_mut();
+        for _ in 0..count {
+            step(&mut r, m);
+        }
+        count
+    } else {
+        r.store(&mut emu.cpu.inner);
+        emu.set_running_for_bench();
+        let before = emu.cpu.steps;
+        for _ in 0..count {
+            emu.run_frame();
+        }
+        (emu.cpu.steps - before) as u32
+    }
+}
+
 // MARK: Rendering
 
 /// 4x4 ordered-dither thresholds, used to show ghosting on the 1-bit screen.

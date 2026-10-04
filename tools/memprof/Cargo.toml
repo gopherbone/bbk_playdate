@@ -1,0 +1,11 @@
+[package]
+name = "memprof"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Simulates the Playdate's data cache over the emulator's memory accesses"
+
+[dependencies]
+bbkemu-core = { path = "../../gen/bbkemu-core", features = ["trace"] }
+
+[workspace]

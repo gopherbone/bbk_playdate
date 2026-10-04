@@ -4,3 +4,4 @@ rust/target/
 BBKEmu.pdx/
 Source/pdex.*
 tools/difftest/target/
+tools/memprof/target/

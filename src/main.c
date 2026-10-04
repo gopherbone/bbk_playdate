@@ -1112,6 +1112,14 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg) {
         pd->system->setUpdateCallback(update, NULL);
 #ifdef BBK_CALIBRATE
         {
+            extern uint32_t bbk_unrolled(uint32_t v);
+            pd->system->resetElapsedTime();
+            uint32_t uv = 1;
+            for (int i = 0; i < 2000; i++) uv = bbk_unrolled(uv);
+            float unrolled = pd->system->getElapsedTime();
+            pd->system->logToConsole("CAL6 unrolled code: %d ps/op (%u)", (int)(unrolled * 1e12f / (2000.0f * 1024)), (unsigned)uv);
+        }
+        {
             volatile uint32_t sink;
             uint32_t v = 1;
             pd->system->resetElapsedTime();
@@ -1168,6 +1176,17 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg) {
                 }
                 pd->system->logToConsole("CAL4 frame %p, 0xA5 fill reaches down to %p (%d words in last run); free below frame ~%d bytes",
                     (void*)sp, (void*)lowest_fill, run, lowest_fill ? (int)((uintptr_t)sp - (uintptr_t)lowest_fill) : -1);
+            }
+            {
+                extern uint32_t bbk_bench_interpreter(uint32_t mode, uint32_t count);
+                pd->system->resetElapsedTime();
+                uint32_t n0 = bbk_bench_interpreter(0, 2000000);
+                float t0 = pd->system->getElapsedTime();
+                pd->system->resetElapsedTime();
+                uint32_t n1 = bbk_bench_interpreter(1, 60);
+                float t1 = pd->system->getElapsedTime();
+                pd->system->logToConsole("CAL5 bare step %d ns/inst (%u insts), run_frame %d ns/inst (%u insts)",
+                    (int)(t0 * 1e9f / n0), (unsigned)n0, (int)(t1 * 1e9f / n1), (unsigned)n1);
             }
             pd->system->logToConsole("CAL3 static-store %d ns, static-read %d ns, sbuf at %p, heap at %p, stack at %p",
                 (int)(staticstore * 1e9f / (2560 * 128)), (int)(staticread * 1e9f / (2560 * 128)), (void*)sbuf, (void*)buf, (void*)small);

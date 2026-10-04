@@ -1,6 +1,6 @@
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -1,18 +1,10 @@
+@@ -1,18 +1,14 @@
  [package]
  name = "bbkemu-core"
 -version.workspace = true
@@ -20,11 +20,14 @@
 -anyhow = { workspace = true }
 -thiserror = { workspace = true }
 -image = { workspace = true }
--
--[dev-dependencies]
--cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy"] }
 +mos6502 = { version = "0.10", default-features = false }
 +log = { version = "0.4", default-features = false }
+ 
+-[dev-dependencies]
+-cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy"] }
++[features]
++# Calls memory::ACCESS_HOOK with each physical address read or written (host profiling).
++trace = []
 --- a/src/audio.rs
 +++ b/src/audio.rs
 @@ -1,5 +1,8 @@
@@ -174,18 +177,19 @@
  }
 --- a/src/emulator.rs
 +++ b/src/emulator.rs
-@@ -1,6 +1,9 @@
+@@ -1,7 +1,10 @@
  //! Main emulator orchestrator
  
 -use anyhow::Result;
 +#[allow(unused_imports)]
 +use crate::prelude::*;
-+
-+use crate::error::Result;
  
++use crate::error::Result;
++
  use crate::audio::Audio;
  use crate::cheat::CheatEngine;
-@@ -252,7 +255,77 @@
+ use crate::cpu::CpuWrapper;
+@@ -252,7 +255,89 @@
      }
  
      /// Run one frame (~16.67ms at 60fps)
@@ -211,19 +215,26 @@
 +        let mut steps = self.cpu.steps;
 +        let mut r = crate::fast6502::Regs::load(&self.cpu.inner);
 +
++        // The RAM buffer never moves (it is only ever copied into), so the
++        // per-instruction flag checks read it through a pointer taken once.
++        let ram: *const u8 = self.cpu.memory().ram.as_ptr();
++        // SAFETY: indices are below 0x300 and ram is RAM_SIZE (32 KiB) long.
++        let ram_at = |i: usize| unsafe { *ram.add(i) };
 +        while cycles_run < cycles_per_frame && self.running {
-+            let m = &mut self.cpu.inner.memory;
-+            let cycles = if m.ram[0x200] & 0x08 != 0 {
++            let cycles = if ram_at(0x200) & 0x08 != 0 {
 +                400 // halted until an interrupt
-+            } else if let Some(cycles) = (r.pc != HLE_FAR_RETURN && m.read(r.pc) != 0x00)
-+                .then(|| crate::fast6502::step(&mut r, m))
-+                .flatten()
-+            {
++            } else if let Some(cycles) = if r.pc != HLE_FAR_RETURN {
++                // Returns None for BRK (0x00) among others, which step() handles.
++                crate::fast6502::step(&mut r, &mut self.cpu.inner.memory)
++            } else {
++                None
++            } {
 +                steps += 1;
 +                cpu_cycles = cpu_cycles.wrapping_add(cycles as u64);
 +                // handle_interrupts acts only when one of these is set.
-+                let ram = &m.ram;
-+                if r.p & 0x04 == 0 && (ram[0x04] & ram[0x23A] & 0x83 != 0 || ram[0x05] & ram[0x23B] & 0xEF != 0) {
++                if r.p & 0x04 == 0
++                    && (ram_at(0x04) & ram_at(0x23A) & 0x83 != 0 || ram_at(0x05) & ram_at(0x23B) & 0xEF != 0)
++                {
 +                    r.store(&mut self.cpu.inner);
 +                    self.handle_interrupts();
 +                    r = crate::fast6502::Regs::load(&self.cpu.inner);
@@ -241,9 +252,8 @@
 +            };
 +            cycles_run += cycles;
 +            remainder += cycles;
-+            let ticks = remainder / timer_step;
-+            if ticks > 0 {
-+                self.cpu.memory_mut().update_timers(ticks);
++            if remainder >= timer_step {
++                self.cpu.memory_mut().update_timers(remainder / timer_step);
 +                remainder %= timer_step;
 +            }
 +        }
@@ -258,16 +268,21 @@
 +        self.frame_count += 1;
 +    }
 +
++    /// Marks the emulator as running without loading a game (benchmarks).
++    #[doc(hidden)]
++    pub fn set_running_for_bench(&mut self) {
++        self.running = true;
++    }
++
 +    /// The original frame loop, one `step` at a time.
 +    pub fn run_frame_reference(&mut self) {
          // Apply cheats at the start of each frame
          if self.cheat.has_active_cheats() {
              let (ram, flash) = self.cpu.memory_mut().get_ram_and_flash();
-@@ -325,21 +398,7 @@
-             self.running = false;
+@@ -326,21 +411,7 @@
              return 1;
          }
--
+ 
 -        // Check for JSR instruction - potential syscall
 -        if opcode == 0x20 {
 -            let target = self.cpu.memory().read16(pc + 1);
@@ -282,10 +297,11 @@
  
 -            // Other JSR calls execute normally
 -        }
- 
+-
          // Execute the instruction normally
          let cycles = self.cpu.step();
-@@ -533,7 +592,12 @@
+ 
+@@ -533,7 +604,12 @@
      /// Render LCD to boolean buffer (true = foreground, false = background)
      pub fn render_lcd_buffer(&mut self) -> [bool; 159 * 96] {
          let mut pixels = [false; 159 * 96];
@@ -298,7 +314,7 @@
          self.cpu.memory_mut().ram[0x400] = self.cpu.memory().ram[0x1000];
          let ram = &self.cpu.memory().ram;
          let mut v = 0x400;
-@@ -541,7 +605,7 @@
+@@ -541,7 +617,7 @@
          for j in (-30i32..=65).rev() {
              let y = if j >= 0 { j } else { -j + 65 } as usize;
              for i in 1..20 {
@@ -307,7 +323,7 @@
                  v += 1;
              }
              v += 13;
-@@ -550,12 +614,10 @@
+@@ -550,12 +626,10 @@
          v = 0x413;
          for j in (-30i32..=64).rev() {
              let y = if j >= 0 { j } else { -j + 65 } as usize;
@@ -908,16 +924,38 @@
  pub mod input;
 --- a/src/memory.rs
 +++ b/src/memory.rs
-@@ -1,5 +1,8 @@
+@@ -1,7 +1,30 @@
  //! Memory bus with bank switching and hardware register handling
  
 +#[allow(unused_imports)]
 +use crate::prelude::*;
 +
++use core::cell::Cell;
++
  use mos6502::memory::Bus;
  
++/// With the `trace` feature: called with (physical address, is_write) for every
++/// read and write of RAM, flash or ROM, for profiling memory behaviour on a host.
++#[cfg(feature = "trace")]
++pub static mut ACCESS_HOOK: Option<fn(u32, bool)> = None;
++
++#[cfg(feature = "trace")]
++#[inline(always)]
++fn trace(addr: u32, write: bool) {
++    // SAFETY: set once by a single-threaded host tool before running.
++    if let Some(hook) = unsafe { ACCESS_HOOK } {
++        hook(addr, write);
++    }
++}
++
++#[cfg(not(feature = "trace"))]
++#[inline(always)]
++fn trace(_addr: u32, _write: bool) {}
++
  /// Physical memory map constants
-@@ -136,7 +139,7 @@
+ pub const RAM_SIZE: usize = 0x8000; // 32 KiB
+ pub const FLASH_SIZE: usize = 0x200000; // 2 MiB
+@@ -136,7 +159,7 @@
  }
  
  /// Flash command state
@@ -926,41 +964,130 @@
  enum FlashCmd {
      Normal,
      ByteProgram,
-@@ -215,7 +218,43 @@
+@@ -161,6 +184,15 @@
+     flash_cycles: u8,
+     /// Timer counters
+     timer_counters: [u32; 5],
++    /// Per-bank page cache for `read`: the bank value it was filled for and a
++    /// pointer to that 4 KiB page's backing bytes (null: no fast mapping).
++    /// Valid while ram/flash/ROM buffers stay in place and flash_cmd is
++    /// unchanged; anything else must call `invalidate_page_cache`.
++    page_key: [Cell<u32>; 16],
++    page_ptr: [Cell<*const u8>; 16],
++    /// The same for `write`, RAM pages only.
++    wpage_key: [Cell<u32>; 16],
++    wpage_ptr: [Cell<*mut u8>; 16],
+ }
+ 
+ impl Default for Memory {
+@@ -174,6 +206,10 @@
+         Self {
+             ram: vec![0; RAM_SIZE],
+             flash: vec![0xFF; FLASH_SIZE],
++            page_key: Default::default(),
++            page_ptr: [const { Cell::new(core::ptr::null()) }; 16],
++            wpage_key: Default::default(),
++            wpage_ptr: [const { Cell::new(core::ptr::null_mut()) }; 16],
+             rom_8: None,
+             rom_e: None,
+             bank_switch: BankSwitch::new(),
+@@ -199,6 +235,7 @@
+         let len = data.len().min(ROM8_SIZE);
+         rom[..len].copy_from_slice(&data[..len]);
+         self.rom_8 = Some(rom);
++        self.invalidate_page_cache();
+     }
+ 
+     /// Load OS ROM (E.BIN) - optional for HLE mode
+@@ -207,6 +244,7 @@
+         let len = data.len().min(ROME_SIZE);
+         rom[..len].copy_from_slice(&data[..len]);
+         self.rom_e = Some(rom);
++        self.invalidate_page_cache();
+     }
+ 
+     /// Get mutable references to RAM and Flash for cheat engine
+@@ -215,7 +253,89 @@
      }
  
      /// Read a byte from memory
 +    #[inline(always)]
      pub fn read(&self, addr: u16) -> u8 {
++        trace(self.physical(addr), false);
 +        // Fast paths for the hot regions; everything else goes through
 +        // read_reference, which this must always agree with.
 +        if addr >= 0x1000 {
-+            let page = self.bank_switch.banks[(addr >> 12) as usize];
-+            let off = (addr & 0x0FFF) as u32;
-+            match page >> 9 {
-+                0 if page < 8 => return self.ram[((page << 12) | off) as usize],
-+                1 if matches!(self.flash_cmd, FlashCmd::Normal | FlashCmd::ByteProgram) => {
-+                    let fa = ((page - 0x200) << 12) | off;
-+                    // The save area (last 32 KiB) is rotated to the front.
-+                    let fa = if fa >= FLASH_SIZE as u32 - 0x8000 { fa + 0x8000 - FLASH_SIZE as u32 } else { fa };
-+                    return self.flash[fa as usize];
-+                }
-+                4 => {
-+                    if let Some(rom) = &self.rom_8 {
-+                        return rom[(((page - 0x800) << 12) | off) as usize];
-+                    }
-+                }
-+                7 => {
-+                    if let Some(rom) = &self.rom_e {
-+                        return rom[(((page - 0xE00) << 12) | off) as usize];
-+                    }
-+                }
-+                _ => {}
++            let b = (addr >> 12) as usize;
++            let ptr = self.page_ptr[b].get();
++            if self.page_key[b].get() == self.bank_switch.banks[b] && !ptr.is_null() {
++                // SAFETY: filled by fill_page from a live buffer with at least
++                // 4 KiB left at ptr; see the page_key field.
++                return unsafe { *ptr.add((addr & 0x0FFF) as usize) };
 +            }
++            return self.read_miss(addr);
 +        } else if addr >= 0x0400 || (0x0100..0x0300).contains(&addr) {
 +            return self.ram[addr as usize];
 +        }
 +        self.read_reference(addr)
++    }
++
++    /// Refills bank `addr >> 12`'s page cache entry, then reads.
++    #[inline(never)]
++    #[cold]
++    fn read_miss(&self, addr: u16) -> u8 {
++        let b = (addr >> 12) as usize;
++        let page = self.bank_switch.banks[b];
++        let ptr = self.page_base(page);
++        self.page_key[b].set(page);
++        self.page_ptr[b].set(ptr);
++        if ptr.is_null() {
++            self.read_reference(addr)
++        } else {
++            // SAFETY: page_base returns the start of a 4 KiB page inside a buffer.
++            unsafe { *ptr.add((addr & 0x0FFF) as usize) }
++        }
++    }
++
++    /// Start of the bytes behind physical page `page` (4 KiB) when plain
++    /// reads of it are just loads; null for anything else.
++    fn page_base(&self, page: u32) -> *const u8 {
++        match page >> 9 {
++            0 if page < 8 => self.ram[(page as usize) << 12..].as_ptr(),
++            1 if matches!(self.flash_cmd, FlashCmd::Normal | FlashCmd::ByteProgram) => {
++                let fa = (page - 0x200) << 12;
++                // The save area (last 32 KiB) is rotated to the front; pages
++                // never straddle that boundary.
++                let fa = if fa >= FLASH_SIZE as u32 - 0x8000 { fa + 0x8000 - FLASH_SIZE as u32 } else { fa };
++                self.flash[fa as usize..].as_ptr()
++            }
++            4 => self.rom_8.as_ref().map_or(core::ptr::null(), |rom| rom[((page - 0x800) as usize) << 12..].as_ptr()),
++            7 => self.rom_e.as_ref().map_or(core::ptr::null(), |rom| rom[((page - 0xE00) as usize) << 12..].as_ptr()),
++            _ => core::ptr::null(),
++        }
++    }
++
++    /// Forgets the page caches. Call after replacing ram, flash or a ROM
++    /// buffer directly, or changing flash_cmd.
++    pub fn invalidate_page_cache(&self) {
++        for (ptr, wptr) in self.page_ptr.iter().zip(self.wpage_ptr.iter()) {
++            ptr.set(core::ptr::null());
++            wptr.set(core::ptr::null_mut());
++        }
++    }
++
++    fn set_flash_cmd(&mut self, cmd: FlashCmd) {
++        self.flash_cmd = cmd;
++        self.invalidate_page_cache();
++    }
++
++    /// Physical address an access to `addr` touches (RAM below 0x8000).
++    #[inline(always)]
++    fn physical(&self, addr: u16) -> u32 {
++        if addr < 0x1000 {
++            addr as u32
++        } else {
++            self.bank_switch.translate(addr)
++        }
 +    }
 +
 +    /// The original, unoptimized read.
@@ -970,18 +1097,30 @@
          match addr {
              // Page 0 - hardware registers
              0x0000..=0x00FF => self.read_page0(addr),
-@@ -233,7 +272,27 @@
+@@ -233,7 +353,39 @@
      }
  
      /// Write a byte to memory
 +    #[inline(always)]
      pub fn write(&mut self, addr: u16, val: u8) {
++        trace(self.physical(addr), true);
 +        // Fast path for plain RAM; everything else (registers, PB, flash
 +        // commands, ROM) goes through write_reference.
 +        if addr >= 0x1000 {
-+            let page = self.bank_switch.banks[(addr >> 12) as usize];
++            let b = (addr >> 12) as usize;
++            let page = self.bank_switch.banks[b];
++            let ptr = self.wpage_ptr[b].get();
++            if self.wpage_key[b].get() == page && !ptr.is_null() {
++                // SAFETY: a RAM page pointer from below; see the page_key field.
++                unsafe { *ptr.add((addr & 0x0FFF) as usize) = val };
++                return;
++            }
 +            if page < 8 {
-+                self.ram[((page << 12) | (addr & 0x0FFF) as u32) as usize] = val;
++                let ptr = self.ram[(page as usize) << 12..].as_mut_ptr();
++                self.wpage_key[b].set(page);
++                self.wpage_ptr[b].set(ptr);
++                // SAFETY: start of a 4 KiB page inside ram.
++                unsafe { *ptr.add((addr & 0x0FFF) as usize) = val };
 +                return;
 +            }
 +        } else if addr >= 0x0400 || ((0x0100..0x0300).contains(&addr) && addr != registers::PB) {
@@ -998,7 +1137,72 @@
          match addr {
              0x0000..=0x00FF => self.write_page0(addr, val),
              0x0100..=0x02FF | 0x0400..=0x0FFF => {
-@@ -658,7 +717,24 @@
+@@ -453,7 +605,7 @@
+                     self.flash_cycles += 1;
+                 } else if val == 0xF0 {
+                     // Software ID Exit / CFI Exit
+-                    self.flash_cmd = FlashCmd::Normal;
++                    self.set_flash_cmd(FlashCmd::Normal);
+                 }
+             }
+             1 | 4 => {
+@@ -470,7 +622,7 @@
+                 match val {
+                     0xA0 => {
+                         // Byte-Program
+-                        self.flash_cmd = FlashCmd::ByteProgram;
++                        self.set_flash_cmd(FlashCmd::ByteProgram);
+                         self.flash_cycles += 1;
+                     }
+                     0x80 => {
+@@ -478,17 +630,17 @@
+                     }
+                     0x90 => {
+                         // Software ID Entry
+-                        self.flash_cmd = FlashCmd::SoftwareId;
++                        self.set_flash_cmd(FlashCmd::SoftwareId);
+                         self.flash_cycles = 0;
+                     }
+                     0x98 => {
+                         // CFI Query Entry
+-                        self.flash_cmd = FlashCmd::CfiQuery;
++                        self.set_flash_cmd(FlashCmd::CfiQuery);
+                         self.flash_cycles = 0;
+                     }
+                     0xF0 => {
+                         // Software ID Exit / CFI Exit
+-                        self.flash_cmd = FlashCmd::Normal;
++                        self.set_flash_cmd(FlashCmd::Normal);
+                         self.flash_cycles = 0;
+                     }
+                     _ => {}
+@@ -497,7 +649,7 @@
+             3 => {
+                 // 4th Bus Write Cycle
+                 if self.flash_cmd == FlashCmd::ByteProgram {
+-                    self.flash_cmd = FlashCmd::Normal;
++                    self.set_flash_cmd(FlashCmd::Normal);
+                     self.flash_cycles = 0;
+                     // Rotate last 32KiB to the front for save
+                     let addr = (addr + 0x8000) % FLASH_SIZE as u32;
+@@ -534,7 +686,7 @@
+                     }
+                     _ => {}
+                 }
+-                self.flash_cmd = FlashCmd::Normal;
++                self.set_flash_cmd(FlashCmd::Normal);
+                 self.flash_cycles = 0;
+             }
+             _ => {
+@@ -637,6 +789,7 @@
+ 
+     /// Restore flash command state from save state
+     pub fn set_flash_state(&mut self, cmd: u8, cycles: u8) {
++        self.invalidate_page_cache();
+         self.flash_cmd = match cmd {
+             1 => FlashCmd::ByteProgram,
+             2 => FlashCmd::SoftwareId,
+@@ -658,7 +811,24 @@
  }
  
  impl Bus for Memory {
@@ -1023,7 +1227,7 @@
          let value = self.read(address);
          if (registers::DATA1..=registers::DATA4).contains(&address) {
              let channel = (address - registers::DATA1) as usize;
-@@ -668,12 +744,9 @@
+@@ -668,12 +838,9 @@
          }
          value
      }

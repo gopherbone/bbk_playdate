@@ -123,17 +123,21 @@ fn reads(configs: usize) -> usize {
     for c in 0..configs {
         m.rom_8 = if c % 3 == 0 { None } else { Some((0..0x200000).map(|i| (i * 7 + c) as u8).collect()) };
         m.rom_e = if c % 5 == 0 { None } else { Some((0..0x200000).map(|i| (i * 13 + c) as u8).collect()) };
+        m.invalidate_page_cache();
         for bk in m.bank_switch.banks.iter_mut() {
             *bk = match rng.next() % 6 {
                 0 => (rng.next() % 8) as u32, 1 => if rng.next() % 2 == 0 { 0x3F8 + (rng.next() % 8) as u32 } else { 0x200 + (rng.next() % 0x200) as u32 }, 2 => 0x800 + (rng.next() % 0x200) as u32,
                 3 => 0xE00 + (rng.next() % 0x200) as u32, 4 => (rng.next() % 0x1000) as u32, _ => rng.next() as u32,
             };
         }
-        m.set_flash_state((rng.next() % 4) as u8, 0);
-        for addr in 0..=0xFFFFu16 {
-            if m.read(addr) != m.read_reference(addr) {
-                if fails < 5 { println!("read {addr:04X} banks {:X?}: fast {:02X} ref {:02X}", m.bank_switch.banks, m.read(addr), m.read_reference(addr)); }
-                fails += 1;
+        // Second pass with only the flash mode changed, to catch stale page caches.
+        for cmd in [(rng.next() % 4) as u8, (rng.next() % 4) as u8] {
+            m.set_flash_state(cmd, 0);
+            for addr in 0..=0xFFFFu16 {
+                if m.read(addr) != m.read_reference(addr) {
+                    if fails < 5 { println!("read {addr:04X} banks {:X?}: fast {:02X} ref {:02X}", m.bank_switch.banks, m.read(addr), m.read_reference(addr)); }
+                    fails += 1;
+                }
             }
         }
     }
@@ -156,6 +160,7 @@ fn writes(configs: usize) -> usize {
             m.bank_switch.banks = banks;
             m.set_flash_state(cmd, 0);
             m.rom_e = if rom { Some(vec![0; 0x200000]) } else { None };
+            m.invalidate_page_cache();
         }
         for _ in 0..4000 {
             let addr = match rng.next() % 4 { 0 => (rng.next() % 0x400) as u16, 1 => 0x200 + (rng.next() % 0x40) as u16, _ => rng.next() as u16 };

@@ -31,7 +31,7 @@ $(error SDK path not found; set ENV value PLAYDATE_SDK_PATH)
 endif
 
 VPATH += src
-SRC = src/main.c
+SRC = src/main.c src/calibrate.c
 UINCDIR = src
 
 UPSTREAM_CORE := upstream/crates/bbkemu-core
