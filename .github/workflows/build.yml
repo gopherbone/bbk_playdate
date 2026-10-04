@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          fetch-depth: 0  # annotated tag messages for release notes
 
       - name: Install Arm toolchain
         run: |
@@ -74,6 +75,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Release notes come from the annotated tag's message.
           gh release create "$GITHUB_REF_NAME" BBKEmu.pdx.zip \
             --title "BBKEmu for Playdate $GITHUB_REF_NAME" \
-            --notes "Sideload \`BBKEmu.pdx.zip\` at https://play.date/account/sideload/ or unzip it into the Games folder of the Playdate's data disk. See the README for where games and ROMs go."
+            --notes-from-tag

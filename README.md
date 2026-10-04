@@ -114,6 +114,33 @@ Set `ARM_TOOLCHAIN=/path/to/bin` if the Arm toolchain isn't under `/Applications
   (`Bundled/`; a separate folder because the Data folder's `Games/` hides the pdx's own).
 - `docs/`: screenshots, rendered from the emulator's frame buffer.
 
+## AI use
+
+This port was written by an AI: Anthropic's Claude (Claude Code, running Claude Opus 5.5),
+working with and directed by gopherbone, who tested it on a real Playdate. That covers the
+code, tests, build setup, screenshots and this README. Claude also drove the device over USB
+to install builds, run benchmarks and read its profiler. Commits it made carry a
+`Co-Authored-By: Claude` trailer.
+
+## Sources and credits
+
+- [BBKEmu](https://github.com/AloysHF/BBKEmu) by Aloys (AloysHF): the emulator core, used via
+  the `upstream/` submodule and patched at build time (GPL-3.0-or-later).
+- [mos6502](https://crates.io/crates/mos6502): the 6502 core upstream uses, still used here for
+  everything outside the fast path and as the reference in `make check`.
+- [Playdate SDK](https://play.date/dev/) and *Inside Playdate with C* by Panic: the C API, build
+  rules and system fonts.
+- [crank](https://github.com/pd-rs/crank): the Rust compiler flags for Playdate device builds.
+- [Arm GNU Toolchain](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads): device
+  builds.
+- Optimization ideas, especially that cache size and slow memory dominate on Playdate:
+  [Dirty Optimization Secrets (C for Playdate)](https://devforum.play.date/t/dirty-optimization-secrets-c-for-playdate/23011)
+  on the Playdate developer forum, and the CrankBoy developers'
+  [interview](https://www.readonlymemo.com/playdate-crankboy-emulator-interview).
+- Bundled: BBK A4980 system ROMs and 伏魔记 (BBK), and Demonbane Chronicle v0.2, gopherbone's
+  English translation of 伏魔记. Game titles are drawn with the 16×16 GB2312 font from the
+  bundled `8.BIN`; the lookup table is generated with Python's `gb2312` codec.
+
 ## License
 
 The code is GPL-3.0-or-later, the same as BBKEmu; see [LICENSE](LICENSE). The bundled BBK system
