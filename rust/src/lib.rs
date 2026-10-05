@@ -138,6 +138,9 @@ pub struct BBKEmulator {
     lcd_ram: Vec<u8>,
     /// Backing store for the last `bbk_battery_export` / `bbk_state_save`.
     export: Vec<u8>,
+    /// The last battery diff and the flash write count it was taken at, so an
+    /// unchanged flash isn't diffed again (2 MB of slow memory on device).
+    battery: Option<(u32, Vec<u8>)>,
 }
 
 unsafe fn emu_mut<'a>(emu: *mut BBKEmulator) -> Option<&'a mut BBKEmulator> {
@@ -174,6 +177,7 @@ pub extern "C" fn bbk_create(model: u32) -> *mut BBKEmulator {
         redraw_all: true,
         lcd_ram: vec![0; LCD_RAM.len() + 1],
         export: Vec::new(),
+        battery: None,
     }))
 }
 
@@ -310,7 +314,8 @@ pub unsafe extern "C" fn bbk_set_cpu_rate(emu: *mut BBKEmulator, rate: f32) {
 
 /// Device microbenchmark: runs a small 6502 loop. `mode` 0 calls the fast path
 /// directly `count` times; mode 1 runs `count` frames of the emulator's frame
-/// loop over the same program. Returns the number of instructions executed.
+/// loop over the same program. Returns instructions executed (mode 0) or 6502
+/// cycles run (mode 1).
 #[doc(hidden)]
 #[no_mangle]
 pub extern "C" fn bbk_bench_interpreter(mode: u32, count: u32) -> u32 {
@@ -332,11 +337,11 @@ pub extern "C" fn bbk_bench_interpreter(mode: u32, count: u32) -> u32 {
     } else {
         r.store(&mut emu.cpu.inner);
         emu.set_running_for_bench();
-        let before = emu.cpu.steps;
+        let before = emu.cpu.cycles();
         for _ in 0..count {
             emu.run_frame();
         }
-        (emu.cpu.steps - before) as u32
+        (emu.cpu.cycles() - before) as u32
     }
 }
 
@@ -613,7 +618,15 @@ pub unsafe extern "C" fn bbk_battery_export(emu: *mut BBKEmulator, len: *mut usi
     if e.pristine_flash.is_empty() {
         return ptr::null();
     }
-    let diff = battery_diff(e);
+    let writes = e.emu.cpu.memory().flash_writes;
+    let diff = match &e.battery {
+        Some((at, diff)) if *at == writes => diff.clone(),
+        _ => {
+            let diff = battery_diff(e);
+            e.battery = Some((writes, diff.clone()));
+            diff
+        }
+    };
     export(e, diff, len)
 }
 
@@ -647,6 +660,7 @@ pub unsafe extern "C" fn bbk_battery_import(emu: *mut BBKEmulator, data: *const 
     for (off, chunk) in records {
         flash[off..off + chunk.len()].copy_from_slice(chunk);
     }
+    e.battery = None;
     true
 }
 
@@ -688,6 +702,7 @@ pub unsafe extern "C" fn bbk_state_load(emu: *mut BBKEmulator, data: *const u8, 
     banks.set_selected(state.bank_switch.selected);
     e.intensity.fill(0);
     e.redraw_all = true;
+    e.battery = None;
     true
 }
 

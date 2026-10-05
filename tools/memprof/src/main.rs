@@ -71,6 +71,21 @@ fn main() {
     let steps0 = e.cpu.steps;
     for _ in first..last { e.run_frame(); }
     let n = (last - first) as f64;
+    {
+        // SAFETY: single-threaded.
+        let counts = unsafe { *core::ptr::addr_of!(bbkemu_core::fast6502::OPCODE_COUNTS) };
+        let total: u64 = counts.iter().sum();
+        let mut ops: Vec<(usize, u64)> = counts.iter().copied().enumerate().filter(|&(_, c)| c > 0).collect();
+        ops.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut acc = 0;
+        print!("opcode mix (fast path, all frames):");
+        for (i, (op, c)) in ops.iter().enumerate().take(32) {
+            acc += c;
+            if i % 8 == 0 { print!("\n "); }
+            print!(" {:02X}:{:.1}%", op, *c as f64 * 100.0 / total as f64);
+        }
+        println!("\n  top 32 cover {:.0}%", acc as f64 * 100.0 / total as f64);
+    }
     S.with(|s| {
         let s = s.borrow();
         let insts = (e.cpu.steps - steps0) as f64 / n;

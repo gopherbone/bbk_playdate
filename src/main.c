@@ -357,7 +357,7 @@ static int frame_acc; // thousandths of a frame
 static float frame_cost_ms; // smoothed time per emulated frame
 // Smoothed per-update times (ms): our render, and time spent outside update()
 // (mostly the system pushing changed rows to the LCD).
-static float render_ms, outside_ms;
+static float render_ms, outside_ms, getframe_ms, mark_ms;
 static unsigned int update_end_ms;
 // Deterministic benchmark: average cost of emulated frames 300-599 after boot.
 static int game_frames;
@@ -697,12 +697,16 @@ static void game_update(void) {
     float r0 = pd->system->getElapsedTime();
     int first, last;
     uint8_t* frame = pd->graphics->getFrame();
+    float r1 = pd->system->getElapsedTime();
+    getframe_ms = getframe_ms * 0.9f + (r1 - r0) * 1000.0f * 0.1f;
     if (config.landscape) {
         bbk_render(emu, frame, LCD_ROWSIZE, 128, 1, 1, ghost_keep[settings.ghosting], &first, &last);
     } else {
         bbk_render(emu, frame, LCD_ROWSIZE, 40, 24, 0, ghost_keep[settings.ghosting], &first, &last);
     }
+    float r2 = pd->system->getElapsedTime();
     if (first <= last) pd->graphics->markUpdatedRows(first, last);
+    mark_ms = mark_ms * 0.9f + (pd->system->getElapsedTime() - r2) * 1000.0f * 0.1f;
     render_ms = render_ms * 0.9f + (pd->system->getElapsedTime() - r0) * 1000.0f * 0.1f;
 
     if (toast_frames > 0) toast_frames--;
@@ -1195,7 +1199,7 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg) {
                 pd->system->resetElapsedTime();
                 uint32_t n1 = bbk_bench_interpreter(1, 60);
                 float t1 = pd->system->getElapsedTime();
-                pd->system->logToConsole("CAL5 bare step %d ns/inst (%u insts), run_frame %d ns/inst (%u insts)",
+                pd->system->logToConsole("CAL5 bare step %d ns/inst (%u insts), run_frame %d ns/6502-cycle (%u cycles)",
                     (int)(t0 * 1e9f / n0), (unsigned)n0, (int)(t1 * 1e9f / n1), (unsigned)n1);
             }
             pd->system->logToConsole("CAL3 static-store %d ns, static-read %d ns, sbuf at %p, heap at %p, stack at %p",

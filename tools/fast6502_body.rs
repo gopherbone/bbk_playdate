@@ -12,6 +12,10 @@ use crate::memory::Memory;
 
 // @CONSTS@
 
+/// Instructions run through the fast path, per opcode (profiling builds only).
+#[cfg(feature = "trace")]
+pub static mut OPCODE_COUNTS: [u64; 256] = [0; 256];
+
 /// Per opcode: kind (bits 0-5), addressing mode (6-9), base cycles (10-13),
 /// parameter (16-24: flag mask, plus bit 8 for "branch if set").
 static TABLE: [u32; 256] = [
@@ -78,6 +82,117 @@ pub fn step_cpu(cpu: &mut CPU<Memory, Nmos6502>) -> Option<u32> {
     Some(cycles)
 }
 
+/// Dedicated paths for the opcodes that dominate real games (the 17 below
+/// are ~80% of instructions executed), ahead of the generic table-driven
+/// path. Same results as that path; None means "not one of these".
+#[inline(always)]
+fn hot(r: &mut Regs, m: &mut Memory, opcode: u8, b1: u8, b2: u8) -> Option<u32> {
+    let abs = u16::from_le_bytes([b1, b2]);
+    let pc = r.pc;
+    let (len, cycles) = match opcode {
+        0xAD => {
+            // LDA abs
+            r.a = m.get_byte(abs);
+            r.p = nz(r.p, r.a);
+            (3, 4)
+        }
+        0x8D => {
+            // STA abs
+            m.write(abs, r.a);
+            (3, 4)
+        }
+        0x69 if r.p & D == 0 => {
+            // ADC #imm (binary mode)
+            let sum = r.a as u16 + b1 as u16 + (r.p & C) as u16;
+            let res = sum as u8;
+            let overflow = (!(r.a ^ b1) & (r.a ^ res) & 0x80) != 0;
+            r.p = nz(r.p & !(C | V), res) | (sum > 0xFF) as u8 | if overflow { V } else { 0 };
+            r.a = res;
+            (2, 2)
+        }
+        0xA0 => {
+            // LDY #imm
+            r.y = b1;
+            r.p = nz(r.p, b1);
+            (2, 2)
+        }
+        0xA9 => {
+            // LDA #imm
+            r.a = b1;
+            r.p = nz(r.p, b1);
+            (2, 2)
+        }
+        0xB1 | 0x91 => {
+            // LDA / STA (zp),Y
+            let lo = m.get_byte(b1 as u16);
+            let hi = m.get_byte(b1.wrapping_add(1) as u16);
+            let base = u16::from_le_bytes([lo, hi]);
+            let ea = base.wrapping_add(r.y as u16);
+            if opcode == 0xB1 {
+                r.a = m.get_byte(ea);
+                r.p = nz(r.p, r.a);
+                (2, 5 + ((base ^ ea) & 0xFF00 != 0) as u32)
+            } else {
+                m.write(ea, r.a);
+                (2, 6)
+            }
+        }
+        0xF0 | 0xD0 => {
+            // BEQ / BNE
+            let next = pc.wrapping_add(2);
+            if (r.p & Z != 0) == (opcode == 0xF0) {
+                let target = next.wrapping_add(b1 as i8 as u16);
+                r.pc = target;
+                return Some(3 + ((next ^ target) & 0xFF00 != 0) as u32);
+            }
+            (2, 2)
+        }
+        0x18 => {
+            // CLC
+            r.p &= !C;
+            (1, 2)
+        }
+        0xC9 | 0xE0 => {
+            // CMP / CPX #imm
+            let reg = if opcode == 0xC9 { r.a } else { r.x };
+            r.p = nz(r.p & !C, reg.wrapping_sub(b1)) | (reg >= b1) as u8;
+            (2, 2)
+        }
+        0x85 => {
+            // STA zp
+            m.write(b1 as u16, r.a);
+            (2, 3)
+        }
+        0xA5 => {
+            // LDA zp
+            r.a = m.get_byte(b1 as u16);
+            r.p = nz(r.p, r.a);
+            (2, 3)
+        }
+        0x4C => {
+            // JMP abs
+            r.pc = abs;
+            return Some(3);
+        }
+        0xAA => {
+            // TAX
+            r.x = r.a;
+            r.p = nz(r.p, r.x);
+            (1, 2)
+        }
+        0xCE => {
+            // DEC abs
+            let v = m.get_byte(abs).wrapping_sub(1);
+            r.p = nz(r.p, v);
+            m.write(abs, v);
+            (3, 6)
+        }
+        _ => return None,
+    };
+    r.pc = pc.wrapping_add(len);
+    Some(cycles)
+}
+
 /// Runs one instruction if the fast path covers it, returning its cycles;
 /// returns None, with no state touched, when mos6502 must run it instead.
 #[inline(always)]
@@ -96,6 +211,14 @@ pub fn step(r: &mut Regs, m: &mut Memory) -> Option<u32> {
         // SAFETY: code_ptr guarantees three readable bytes.
         unsafe { (*code, *code.add(1), *code.add(2)) }
     };
+    #[cfg(feature = "trace")]
+    // SAFETY: profiling builds are single-threaded host tools.
+    unsafe {
+        OPCODE_COUNTS[opcode as usize] += 1;
+    }
+    if let Some(cycles) = hot(r, m, opcode, b1, b2) {
+        return Some(cycles);
+    }
     let e = TABLE[opcode as usize];
     let kind = e & 0x3F;
     let mut p = r.p;
@@ -328,9 +451,10 @@ pub struct Counters {
     pub cycles_run: u32,
     /// Cycles toward the next timer tick.
     pub remainder: u32,
-    /// CPU cycles run here, to add to the CPU's cycle count.
-    pub cpu_cycles: u32,
-    /// Instructions run here.
+    /// Halted cycles within `cycles_run` (the rest ran on the CPU).
+    pub halted: u32,
+    /// Instructions run here (profiling builds only).
+    #[cfg(feature = "trace")]
     pub steps: u32,
 }
 
@@ -346,38 +470,47 @@ pub fn run(r: &mut Regs, m: &mut Memory, n: &mut Counters, budget: u32, timer_st
     // SAFETY: every index below is under 0x300 and ram is 32 KiB.
     let ram_at = |i: usize| unsafe { *ram.add(i) };
     let mut cycles_run = n.cycles_run;
-    let mut remainder = n.remainder;
-    let mut cpu_cycles = n.cpu_cycles;
-    let mut steps = n.steps;
+    let mut halted = n.halted;
+    // Cycle count at which the next timer tick falls due.
+    let mut tick_at = cycles_run + (timer_step - n.remainder);
     let exit = loop {
         if cycles_run >= budget {
             break Exit::Budget;
         }
-        let cycles = if ram_at(0x200) & 0x08 != 0 {
-            400 // halted until an interrupt
+        if ram_at(0x200) & 0x08 != 0 {
+            // Halted until an interrupt.
+            cycles_run += 400;
+            halted += 400;
         } else {
             if regs.pc == hle_return {
                 break Exit::Slow;
             }
             let Some(cycles) = step(&mut regs, m) else { break Exit::Slow };
-            cpu_cycles = cpu_cycles.wrapping_add(cycles);
-            steps = steps.wrapping_add(1);
+            #[cfg(feature = "trace")]
+            {
+                n.steps += 1;
+            }
             // Emulator::handle_interrupts acts only when one of these is set.
             if regs.p & 0x04 == 0
                 && (ram_at(0x04) & ram_at(0x23A) & 0x83 != 0 || ram_at(0x05) & ram_at(0x23B) & 0xEF != 0)
             {
-                break Exit::Interrupt(cycles);
+                *r = regs;
+                n.cycles_run = cycles_run;
+                n.halted = halted;
+                n.remainder = timer_step - (tick_at - cycles_run);
+                return Exit::Interrupt(cycles);
             }
-            cycles
-        };
-        cycles_run += cycles;
-        remainder += cycles;
-        if remainder >= timer_step {
-            m.update_timers(remainder / timer_step);
-            remainder %= timer_step;
+            cycles_run += cycles;
+        }
+        if cycles_run >= tick_at {
+            let elapsed = cycles_run - (tick_at - timer_step); // == old remainder + cycles
+            m.update_timers(elapsed / timer_step);
+            tick_at = cycles_run + (timer_step - elapsed % timer_step);
         }
     };
     *r = regs;
-    *n = Counters { cycles_run, remainder, cpu_cycles, steps };
+    n.cycles_run = cycles_run;
+    n.halted = halted;
+    n.remainder = timer_step - (tick_at - cycles_run);
     exit
 }
