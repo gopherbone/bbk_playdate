@@ -15,6 +15,8 @@ It comes ready to play. The release bundles the A4980 system ROMs and three Engl
 translations: **Demonbane Chronicle v0.3** (伏魔记), **Heroes of Jin Yong v0.2** (金庸群侠传) and
 **Heroes' Altar v0.1** (英雄坛说).
 
+![Demonbane Chronicle on the Device border, styled after the dictionaries](docs/device-frame.png)
+
 | | |
 |---|---|
 | ![Game list with Chinese titles](docs/game-list.png) | ![Demonbane Chronicle title screen](docs/demonbane-title.png) |
@@ -26,6 +28,7 @@ translations: **Demonbane Chronicle v0.3** (伏魔记), **Heroes of Jin Yong v0.
 - Game list with Chinese titles, drawn with the dictionary's own font from `8.BIN`.
 - Battery saves are written automatically; 3 save-state slots per game.
 - An on-screen keypad (crank or D-pad) for every BBK key.
+- A white or black border, or a Device frame styled after the dictionaries themselves.
 
 ## Install
 
@@ -57,7 +60,7 @@ flash emulation (below), which changes the file's layout.
 | Ⓐ | Enter |
 | Ⓑ | Exit |
 | Menu → **keypad** | Any key: move with the crank or D-pad, Ⓐ presses it |
-| Menu → **options** | Save/load state, state slot, portrait/landscape, ghosting, model, performance overlay, reset |
+| Menu → **options** | Save/load state, state slot, portrait/landscape, border (white, black or device), ghosting, model, performance overlay, reset |
 | Menu → **game list** | Back to the list (saves first) |
 
 For landscape games, hold the Playdate with the crank on top; the D-pad turns with it.

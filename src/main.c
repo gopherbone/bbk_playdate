@@ -103,7 +103,10 @@ static void free_buf(void* p) {
 typedef struct {
     int ghosting;   // 0 off, 1 low, 2 high
     int show_speed;
+    int border;     // BORDER_*
 } Settings;
+
+enum { BORDER_WHITE, BORDER_BLACK, BORDER_DEVICE, BORDER_COUNT };
 
 typedef struct {
     int model;      // 0 A4980, 1 A4988, -1 unset
@@ -111,7 +114,7 @@ typedef struct {
     int slot;
 } GameConfig;
 
-static Settings settings = {1, 0};
+static Settings settings = {1, 0, BORDER_WHITE};
 
 // Parses "key=value" lines, calling `apply` for each.
 static void read_kv(const char* path, void (*apply)(const char* key, int value, void* ud), void* ud) {
@@ -142,11 +145,13 @@ static void apply_setting(const char* key, int value, void* ud) {
     (void)ud;
     if (!strcmp(key, "ghosting")) settings.ghosting = value < 0 ? 0 : value > 2 ? 2 : value;
     else if (!strcmp(key, "show_speed")) settings.show_speed = value != 0;
+    else if (!strcmp(key, "border")) settings.border = value >= 0 && value < BORDER_COUNT ? value : BORDER_WHITE;
 }
 
 static void save_settings(void) {
-    char buf[64];
-    int n = snprintf(buf, sizeof buf, "ghosting=%d\nshow_speed=%d\n", settings.ghosting, settings.show_speed);
+    char buf[96];
+    int n = snprintf(buf, sizeof buf, "ghosting=%d\nshow_speed=%d\nborder=%d\n", settings.ghosting,
+                     settings.show_speed, settings.border);
     write_file("settings.txt", (uint8_t*)buf, n);
 }
 
@@ -206,7 +211,7 @@ static void load_cjk_font(void) {
     for (int model = 0; model < 2 && !cjk_font; model++) {
         char path[64];
         snprintf(path, sizeof path, "ROMs/%s/8.BIN", model_name(model));
-        SDFile* f = pd->file->open(path, kFileReadData);
+        SDFile* f = pd->file->open(path, kFileReadData | kFileRead);
         if (!f) continue;
         uint8_t* buf = pd->system->realloc(NULL, len);
         size_t got = 0;
@@ -533,6 +538,10 @@ static void start_game(const char* name) {
     if (battery && bbk_battery_import(emu, battery, len)) {
         last_battery = battery;
         last_battery_len = len;
+    } else if (battery && len <= 8) {
+        // An empty save from an older version: nothing to keep.
+        free_buf(battery);
+        pd->file->unlink(path, 0);
     } else if (battery) {
         // A save from an older version (different flash layout): keep it,
         // but out of the way, so the game starts clean.
@@ -614,12 +623,39 @@ static void release_all_keys(void) {
     deferred_release = 0;
 }
 
+// A light dither for the device frame's silver bezel.
+static LCDPattern bezel_pattern = {
+    0xEE, 0xFF, 0xBB, 0xFF, 0xEE, 0xFF, 0xBB, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+};
+
+// Frame around the LCD in the style of the dictionaries: silver bezel, dark
+// screen edge, the brand and model printed underneath.
+static void draw_device_frame(void) {
+    pd->graphics->clear(kColorBlack);
+    pd->graphics->fillRoundRect(14, 3, 372, 237, 12, (LCDColor)bezel_pattern);
+    pd->graphics->drawRoundRect(14, 3, 372, 237, 12, 1, kColorBlack);
+    pd->graphics->fillRoundRect(33, 17, 334, 206, 4, kColorBlack);
+    char label[48];
+    snprintf(label, sizeof label, "步步高  BBK %s", model_name(config.model));
+    pd->graphics->setFont(small_font);
+    // Width: hanzi are 17 px each from 8.BIN, the rest is the system font.
+    int w = 3 * 17 + pd->graphics->getTextWidth(small_font, label + 9, strlen(label + 9), kUTF8Encoding, 0);
+    draw_name(small_font, label, 200 - w / 2, 223, 400, 0);
+}
+
 static void game_draw_chrome(void) {
-    pd->graphics->clear(kColorWhite);
     if (config.landscape) {
-        pd->graphics->drawRect(128 - 3, 1 - 1, 144 + 6, 238 + 2, kColorBlack);
+        // The device frame is portrait; landscape gets the plain black border.
+        int black = settings.border != BORDER_WHITE;
+        pd->graphics->clear(black ? kColorBlack : kColorWhite);
+        pd->graphics->drawRect(128 - 3, 1 - 1, 144 + 6, 238 + 2, black ? kColorWhite : kColorBlack);
+    } else if (settings.border == BORDER_DEVICE) {
+        draw_device_frame();
     } else {
-        pd->graphics->drawRect(40 - 3, 24 - 3, 318 + 6, 192 + 6, kColorBlack);
+        int black = settings.border == BORDER_BLACK;
+        pd->graphics->clear(black ? kColorBlack : kColorWhite);
+        pd->graphics->drawRect(40 - 3, 24 - 3, 318 + 6, 192 + 6, black ? kColorWhite : kColorBlack);
     }
     if (emu) bbk_reset_ghosting(emu);
 }
@@ -640,16 +676,28 @@ static void game_draw_status(int force) {
             snprintf(text + n, sizeof text - n, "  bench %d.%d", (int)bench_ms_result, (int)(bench_ms_result * 10) % 10);
     }
     if (!force && !strcmp(text, status_shown)) return;
+    int had_text = status_shown[0] != 0;
     memcpy(status_shown, text, sizeof text);
     // Status text lives in the top band (portrait) or the left margin (landscape).
     int x = 4, y = 4, w = config.landscape ? 118 : 392, h = config.landscape ? 64 : 15;
-    pd->graphics->fillRect(x, y, w, h, kColorWhite);
+    int dark = settings.border != BORDER_WHITE;
+    if (!text[0] && settings.border == BORDER_DEVICE && !config.landscape) {
+        // The overlay sits on the frame: redraw the frame to clear it.
+        if (had_text && !force) {
+            game_draw_chrome();
+            needs_redraw = 0;
+        }
+        return;
+    }
+    pd->graphics->fillRect(x, y, w, h, dark ? kColorBlack : kColorWhite);
     pd->graphics->setFont(small_font);
+    if (dark) pd->graphics->setDrawMode(kDrawModeFillWhite);
     if (config.landscape) {
         draw_wrapped(small_font, text, x, y, w);
     } else {
         pd->graphics->drawText(text, strlen(text), kUTF8Encoding, x, y);
     }
+    pd->graphics->setDrawMode(kDrawModeCopy);
 }
 
 // Runs inside bbk_run_frames before each emulated frame: key repeat, keypad taps, autosave.
@@ -832,18 +880,21 @@ static void keypad_update(void) {
 // MARK: Options
 
 enum {
-    OPT_SAVE, OPT_LOAD, OPT_SLOT, OPT_DISPLAY, OPT_GHOSTING, OPT_MODEL, OPT_SPEED, OPT_RESET, OPT_QUIT, OPT_COUNT
+    OPT_SAVE, OPT_LOAD, OPT_SLOT, OPT_DISPLAY, OPT_BORDER, OPT_GHOSTING, OPT_MODEL, OPT_SPEED, OPT_RESET, OPT_QUIT,
+    OPT_COUNT
 };
 
 static int opt_selected;
 
 static void option_label(int i, char* out, size_t cap) {
     static const char* ghost_names[3] = {"Off", "Low", "High"};
+    static const char* border_names[BORDER_COUNT] = {"White", "Black", "Device"};
     switch (i) {
     case OPT_SAVE: snprintf(out, cap, "Save state"); break;
     case OPT_LOAD: snprintf(out, cap, "Load state"); break;
     case OPT_SLOT: snprintf(out, cap, "State slot\t%d", config.slot); break;
     case OPT_DISPLAY: snprintf(out, cap, "Display\t%s", config.landscape ? "Landscape" : "Portrait"); break;
+    case OPT_BORDER: snprintf(out, cap, "Border\t%s", border_names[settings.border]); break;
     case OPT_GHOSTING: snprintf(out, cap, "LCD ghosting\t%s", ghost_names[settings.ghosting]); break;
     case OPT_MODEL: snprintf(out, cap, "Model (A switches, restarts)\t%s", model_name(config.model)); break;
     case OPT_SPEED: snprintf(out, cap, "Show performance\t%s", settings.show_speed ? "On" : "Off"); break;
@@ -857,7 +908,7 @@ static void options_draw(void) {
     pd->graphics->setFont(font);
     draw_name(font, game_name, 12, 8, 388, 0);
     pd->graphics->drawLine(12, 30, 388, 30, 1, kColorBlack);
-    int row_h = 22, y0 = 36;
+    int row_h = 20, y0 = 36;
     for (int i = 0; i < OPT_COUNT; i++) {
         char label[96];
         option_label(i, label, sizeof label);
@@ -910,6 +961,10 @@ static void options_update(void) {
             break;
         case OPT_GHOSTING:
             settings.ghosting = (settings.ghosting + dir + 3) % 3;
+            save_settings();
+            break;
+        case OPT_BORDER:
+            settings.border = (settings.border + dir + BORDER_COUNT) % BORDER_COUNT;
             save_settings();
             break;
         case OPT_SPEED:
