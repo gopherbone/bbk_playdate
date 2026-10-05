@@ -24,6 +24,8 @@ void bbk_key_down(BBKEmulator* emu, uint8_t code);
 void bbk_key_up(BBKEmulator* emu);
 // Runs every instruction through mos6502 instead of the fast path (for comparison).
 void bbk_set_reference(BBKEmulator* emu, bool reference);
+// Whether the firmware's Shift latch is set (RAM $2B27 bit 5).
+bool bbk_shift_latched(BBKEmulator* emu);
 void bbk_set_cpu_rate(BBKEmulator* emu, float rate);
 
 // Draws into a 1-bit frame buffer (MSB first, 1 = white). Portrait is 2x (318x192),

@@ -252,6 +252,15 @@ pub unsafe extern "C" fn bbk_set_reference(emu: *mut BBKEmulator, reference: boo
     }
 }
 
+/// Whether the firmware's Shift latch is set (RAM $2B27 bit 5).
+///
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_shift_latched(emu: *mut BBKEmulator) -> bool {
+    emu_mut(emu).is_some_and(|e| e.emu.cpu.memory().ram[0x2B27] & 0x20 != 0)
+}
+
 /// Called before each frame of `bbk_run_frames` with the frame's index.
 pub type FrameHook = unsafe extern "C" fn(userdata: *mut c_void, frame: u32);
 

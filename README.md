@@ -11,10 +11,12 @@ It runs [BBKEmu](https://github.com/AloysHF/BBKEmu)'s emulator core (pulled in u
 the `upstream/` submodule, then patched at build time to run without the Rust standard library)
 behind a small C frontend.
 
-It comes ready to play. The release bundles the A4980 system ROMs and five English fan
-translations: **Demonbane Chronicle v0.4** (伏魔记), **Heroes of Jin Yong v0.3** (金庸群侠传),
-**Heroes' Altar v0.2** (英雄坛说), **Cross Entry v0.2** (十字之门) and **Three Kingdoms: Hegemony
-v0.1** (三国霸业).
+It comes ready to play. The release bundles the A4980 system ROMs and six English fan
+translations: **Demonbane Chronicle v0.6** (伏魔记), **Heroes of Jin Yong v0.5** (金庸群侠传),
+**Heroes' Altar v0.4** (英雄坛说), **Cross Entry v0.4** (十字之门), **Ode to Gallantry v0.2** (侠客行)
+and **Three Kingdoms: Hegemony v0.1** (三国霸业).
+
+> **Content note, Ode to Gallantry:** This fan game, written around 2005, has a side area on a "Japan Island" built on crude anti-Japanese jokes: the player spits on and kicks a Japanese official, and refusing ends the game for "shaming China". The jokes come from their moment. In spring 2005 Japan's bid for a permanent UN Security Council seat, together with Japanese history textbooks that played down wartime atrocities and prime-ministerial visits to the Yasukuni Shrine, set off mass protests across China, and that anger filled the Chinese teenage forums this game came from. Behind it lies the memory of Japan's invasion and occupation of China (1931-1945). The translation keeps these scenes as written but not the slur 小日本 ("little Japan"), which becomes "the Japanese". The game also has its teenage authors' swearing and crude humour.
 
 ![Demonbane Chronicle on the Device border, styled after the dictionaries](docs/device-frame.png)
 
@@ -38,7 +40,7 @@ Download `BBKEmu.pdx.zip` from the [latest release](../../releases/latest) and e
 [play.date/account/sideload](https://play.date/account/sideload/), or unzip it into the `Games`
 folder of the Playdate's data disk.
 
-All five translations are in the game list straight away. To add more games, run BBKEmu once so it
+All six translations are in the game list straight away. To add more games, run BBKEmu once so it
 creates its folders, then reboot the Playdate to its data disk (Settings → System → Reboot to
 Data Disk) and open the folder in `Data/` ending in `com.gopherbone.bbkemu` (sideloaded games
 get a `user.` prefix):
@@ -61,7 +63,7 @@ flash emulation (below), which changes the file's layout.
 | D-pad | Arrow keys |
 | Ⓐ | Enter |
 | Ⓑ | Exit |
-| Menu → **keypad** | Any key: move with the crank or D-pad, Ⓐ presses it |
+| Menu → **keypad** | Any key: move with the crank or D-pad, Ⓐ presses it. SRCH/INS/MOD/DEL (查找/插入/修改/删除) are sent as Shift + an arrow, which is how this firmware reads them |
 | Menu → **options** | Save/load state, state slot, portrait/landscape, border (white, black or device), ghosting, sound (off, raw or soft), model, performance overlay, reset |
 | Menu → **game list** | Back to the list (saves first) |
 
@@ -193,10 +195,13 @@ Set `ARM_TOOLCHAIN=/path/to/bin` if the Arm toolchain isn't under `/Applications
   [Dirty Optimization Secrets (C for Playdate)](https://devforum.play.date/t/dirty-optimization-secrets-c-for-playdate/23011)
   on the Playdate developer forum, and the CrankBoy developers'
   [interview](https://www.readonlymemo.com/playdate-crankboy-emulator-interview).
+- The emulator-core fixes (flash layout, interrupts, power-off) and the keypad's dictionary-key
+  combos come from gopherbone's BBKEmu fork in the bbk_tl translation project.
 - Bundled: BBK A4980 system ROMs; 伏魔记 and 三国霸业 (BBK and its developers), 金庸群侠传 (BOSS
-  Studio, BOSS工作室), 英雄坛说 (Caizi Studio, 才子工作室) and 十字之门 (翼王, Yiwang), with gopherbone's English
-  translations Demonbane Chronicle v0.4, Heroes of Jin Yong v0.3, Heroes' Altar v0.2, Cross
-  Entry v0.2 and Three Kingdoms: Hegemony v0.1. Game titles are drawn
+  Studio, BOSS工作室), 英雄坛说 (Caizi Studio, 才子工作室), 十字之门 (翼王, Yiwang) and 侠客行
+  (Chunlan Studio, 纯蓝工作室), with gopherbone's English translations Demonbane Chronicle v0.6,
+  Heroes of Jin Yong v0.5, Heroes' Altar v0.4, Cross Entry v0.4, Ode to Gallantry v0.2 and Three
+  Kingdoms: Hegemony v0.1. Game titles are drawn
   with the 16×16 GB2312 font from the bundled `8.BIN`; the lookup table is generated with
   Python's `gb2312` codec.
 
@@ -204,5 +209,5 @@ Set `ARM_TOOLCHAIN=/path/to/bin` if the Arm toolchain isn't under `/Applications
 
 The code is GPL-3.0-or-later, the same as BBKEmu; see [LICENSE](LICENSE). The bundled BBK system
 ROMs, 伏魔记 and 三国霸业 belong to BBK (and its developers), 金庸群侠传 to BOSS Studio, 英雄坛说
-to Caizi Studio and 十字之门 to 翼王 (Yiwang); they are included as abandonware. Demonbane Chronicle, Heroes of Jin
-Yong, Heroes' Altar, Cross Entry and Three Kingdoms: Hegemony are fan translations.
+to Caizi Studio, 十字之门 to 翼王 (Yiwang) and 侠客行 to Chunlan Studio; they are included as
+abandonware. The English versions are gopherbone's fan translations.

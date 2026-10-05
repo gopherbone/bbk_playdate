@@ -440,6 +440,11 @@ static int repeat_countdown;
 static PDButtons deferred_release;
 static int tap_code = -1;
 static int tap_frames;
+static int tap_hold;                // frames the current tap holds its key
+static int tap_next = -1;           // a second key to tap (dictionary combos)
+static int tap_wait;                // frames before tap_next starts
+#define SHIFT_HOLD 2                // dictionary combos: Shift held 2 frames,
+#define COMBO_GAP 6                 // then the arrow 6 frames after Shift
 static int autosave_countdown;
 static unsigned int last_ms;
 static int frame_acc; // thousandths of a frame
@@ -640,6 +645,8 @@ static void start_game(const char* name) {
     held_count = 0;
     deferred_release = 0;
     tap_code = -1;
+    tap_next = -1;
+    tap_wait = 0;
     autosave_countdown = AUTOSAVE_FRAMES;
     frame_acc = 0;
     frame_cost_ms = 0;
@@ -791,11 +798,18 @@ static void game_draw_status(int force) {
 static void before_frame(void* ud, uint32_t frame) {
     (void)ud;
     (void)frame;
-    if (tap_code >= 0) {
-        if (tap_frames == TAP_FRAMES) bbk_key_down(emu, tap_code);
+    if (tap_wait > 0) {
+        if (--tap_wait == 0) {
+            tap_code = tap_next;
+            tap_hold = tap_frames = TAP_FRAMES;
+            tap_next = -1;
+        }
+    } else if (tap_code >= 0) {
+        if (tap_frames == tap_hold) bbk_key_down(emu, tap_code);
         if (--tap_frames <= 0) {
             bbk_key_up(emu);
             tap_code = -1;
+            if (tap_next >= 0) tap_wait = COMBO_GAP - SHIFT_HOLD;
         }
     } else if (held_count > 0 && --repeat_countdown <= 0) {
         bbk_key_down(emu, held[held_count - 1]);
@@ -950,8 +964,24 @@ static void keypad_update(void) {
         moved = 1;
     }
     if (pushed & kButtonA) {
-        tap_code = pad_keys[pad_row][pad_col].code;
-        tap_frames = TAP_FRAMES;
+        // The dictionary keys (查找/插入/修改/删除) aren't keys of their own in
+        // this firmware: raw $2D is a latched Shift, and Shift + an arrow
+        // gives SEARCH/INSERT/MODIFY/DEL (key tables at E.BIN $A3C36/$A3CB6;
+        // found by bbk_tl's BBKEmu fork). Send Shift (unless already
+        // latched), then the arrow.
+        uint8_t code = pad_keys[pad_row][pad_col].code;
+        int arrow = code == 0x2A ? 0x38 : code == 0x2B ? 0x39 : code == 0x2C ? 0x35 : code == 0x2D ? 0x37 : -1;
+        if (arrow < 0) {
+            tap_code = code;
+            tap_hold = tap_frames = TAP_FRAMES;
+        } else if (bbk_shift_latched(emu)) {
+            tap_code = arrow;
+            tap_hold = tap_frames = TAP_FRAMES;
+        } else {
+            tap_code = 0x2D;
+            tap_hold = tap_frames = SHIFT_HOLD;
+            tap_next = arrow;
+        }
     }
     if (pushed & (kButtonA | kButtonB)) {
         last_ms = pd->system->getCurrentTimeMilliseconds();
