@@ -177,19 +177,18 @@
  }
 --- a/src/emulator.rs
 +++ b/src/emulator.rs
-@@ -1,7 +1,10 @@
+@@ -1,6 +1,9 @@
  //! Main emulator orchestrator
  
 -use anyhow::Result;
 +#[allow(unused_imports)]
 +use crate::prelude::*;
- 
-+use crate::error::Result;
 +
++use crate::error::Result;
+ 
  use crate::audio::Audio;
  use crate::cheat::CheatEngine;
- use crate::cpu::CpuWrapper;
-@@ -252,7 +255,89 @@
+@@ -252,7 +255,79 @@
      }
  
      /// Run one frame (~16.67ms at 60fps)
@@ -209,58 +208,48 @@
 +        }
 +        let cycles_per_frame = (4_000_000.0 / 60.0 * self.cpu_rate) as u32;
 +        let timer_step = (400.0 / self.timer_rate) as u32;
-+        let mut cycles_run = 0u32;
-+        let mut remainder = self.timer_cycle_remainder;
-+        let mut cpu_cycles = self.cpu.inner.cycles;
-+        let mut steps = self.cpu.steps;
++        let mut n = crate::fast6502::Counters {
++            cycles_run: 0,
++            remainder: self.timer_cycle_remainder,
++            cpu_cycles: 0,
++            steps: 0,
++        };
 +        let mut r = crate::fast6502::Regs::load(&self.cpu.inner);
-+
-+        // The RAM buffer never moves (it is only ever copied into), so the
-+        // per-instruction flag checks read it through a pointer taken once.
-+        let ram: *const u8 = self.cpu.memory().ram.as_ptr();
-+        // SAFETY: indices are below 0x300 and ram is RAM_SIZE (32 KiB) long.
-+        let ram_at = |i: usize| unsafe { *ram.add(i) };
-+        while cycles_run < cycles_per_frame && self.running {
-+            let cycles = if ram_at(0x200) & 0x08 != 0 {
-+                400 // halted until an interrupt
-+            } else if let Some(cycles) = if r.pc != HLE_FAR_RETURN {
-+                // Returns None for BRK (0x00) among others, which step() handles.
-+                crate::fast6502::step(&mut r, &mut self.cpu.inner.memory)
-+            } else {
-+                None
-+            } {
-+                steps += 1;
-+                cpu_cycles = cpu_cycles.wrapping_add(cycles as u64);
-+                // handle_interrupts acts only when one of these is set.
-+                if r.p & 0x04 == 0
-+                    && (ram_at(0x04) & ram_at(0x23A) & 0x83 != 0 || ram_at(0x05) & ram_at(0x23B) & 0xEF != 0)
-+                {
++        while n.cycles_run < cycles_per_frame && self.running {
++            let exit = crate::fast6502::run(
++                &mut r,
++                &mut self.cpu.inner.memory,
++                &mut n,
++                cycles_per_frame,
++                timer_step,
++                HLE_FAR_RETURN,
++            );
++            let cycles = match exit {
++                crate::fast6502::Exit::Budget => break,
++                crate::fast6502::Exit::Interrupt(cycles) => {
 +                    r.store(&mut self.cpu.inner);
 +                    self.handle_interrupts();
 +                    r = crate::fast6502::Regs::load(&self.cpu.inner);
++                    cycles
 +                }
-+                cycles
-+            } else {
-+                r.store(&mut self.cpu.inner);
-+                self.cpu.inner.cycles = cpu_cycles;
-+                self.cpu.steps = steps;
-+                let cycles = self.step();
-+                r = crate::fast6502::Regs::load(&self.cpu.inner);
-+                cpu_cycles = self.cpu.inner.cycles;
-+                steps = self.cpu.steps;
-+                cycles
++                crate::fast6502::Exit::Slow => {
++                    r.store(&mut self.cpu.inner);
++                    let cycles = self.step();
++                    r = crate::fast6502::Regs::load(&self.cpu.inner);
++                    cycles
++                }
 +            };
-+            cycles_run += cycles;
-+            remainder += cycles;
-+            if remainder >= timer_step {
-+                self.cpu.memory_mut().update_timers(remainder / timer_step);
-+                remainder %= timer_step;
++            n.cycles_run += cycles;
++            n.remainder += cycles;
++            if n.remainder >= timer_step {
++                self.cpu.memory_mut().update_timers(n.remainder / timer_step);
++                n.remainder %= timer_step;
 +            }
 +        }
 +        r.store(&mut self.cpu.inner);
-+        self.cpu.inner.cycles = cpu_cycles;
-+        self.cpu.steps = steps;
-+        self.timer_cycle_remainder = remainder;
++        self.cpu.inner.cycles = self.cpu.inner.cycles.wrapping_add(n.cpu_cycles as u64);
++        self.cpu.steps += n.steps as u64;
++        self.timer_cycle_remainder = n.remainder;
 +
 +        if self.frame_count.is_multiple_of(60) {
 +            self.cpu.memory_mut().update_rtc();
@@ -279,7 +268,7 @@
          // Apply cheats at the start of each frame
          if self.cheat.has_active_cheats() {
              let (ram, flash) = self.cpu.memory_mut().get_ram_and_flash();
-@@ -326,21 +411,7 @@
+@@ -326,21 +401,7 @@
              return 1;
          }
  
@@ -301,7 +290,7 @@
          // Execute the instruction normally
          let cycles = self.cpu.step();
  
-@@ -533,7 +604,12 @@
+@@ -533,7 +594,12 @@
      /// Render LCD to boolean buffer (true = foreground, false = background)
      pub fn render_lcd_buffer(&mut self) -> [bool; 159 * 96] {
          let mut pixels = [false; 159 * 96];
@@ -314,7 +303,7 @@
          self.cpu.memory_mut().ram[0x400] = self.cpu.memory().ram[0x1000];
          let ram = &self.cpu.memory().ram;
          let mut v = 0x400;
-@@ -541,7 +617,7 @@
+@@ -541,7 +607,7 @@
          for j in (-30i32..=65).rev() {
              let y = if j >= 0 { j } else { -j + 65 } as usize;
              for i in 1..20 {
@@ -323,7 +312,7 @@
                  v += 1;
              }
              v += 13;
-@@ -550,12 +626,10 @@
+@@ -550,12 +616,10 @@
          v = 0x413;
          for j in (-30i32..=64).rev() {
              let y = if j >= 0 { j } else { -j + 65 } as usize;
@@ -365,7 +354,7 @@
 +}
 --- a/src/fast6502.rs
 +++ b/src/fast6502.rs
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,472 @@
 +// Generated by tools/gen_fast6502.py from tools/fast6502_body.rs. Do not edit.
 +
 +// Fast path for the documented NMOS 6502 opcodes over mos6502's CPU struct,
@@ -486,11 +475,6 @@
 +    (p & !(Z | N)) | (v & N) | if v == 0 { Z } else { 0 }
 +}
 +
-+#[inline(always)]
-+fn rd16(m: &Memory, addr: u16) -> u16 {
-+    u16::from_le_bytes([m.read(addr), m.read(addr.wrapping_add(1))])
-+}
-+
 +/// CPU registers held outside mos6502's CPU struct, so a frame's worth of
 +/// instructions can run with them in locals: on the Playdate every store to a
 +/// new heap cache line costs ~0.5 us.
@@ -548,7 +532,17 @@
 +    if !(0x0100..=0xFFFC).contains(&pc) {
 +        return None;
 +    }
-+    let e = TABLE[m.read(pc) as usize];
++    // Opcode and both operand bytes, through one page lookup when the code
++    // sits in a fast-mapped page. Plain reads: with PC in 0x0100..=0xFFFC
++    // these can't touch the side-effecting DATA registers.
++    let code = m.code_ptr(pc);
++    let (opcode, b1, b2) = if code.is_null() {
++        (m.read(pc), m.read(pc.wrapping_add(1)), m.read(pc.wrapping_add(2)))
++    } else {
++        // SAFETY: code_ptr guarantees three readable bytes.
++        unsafe { (*code, *code.add(1), *code.add(2)) }
++    };
++    let e = TABLE[opcode as usize];
 +    let kind = e & 0x3F;
 +    let mut p = r.p;
 +    if kind == SLOW || ((kind == ADC || kind == SBC) && p & D != 0) {
@@ -562,10 +556,8 @@
 +    let mut y = r.y;
 +    let mut s = r.s;
 +
-+    // Operand bytes are plain reads: with PC in 0x0100..=0xFFFC they can't
-+    // touch the side-effecting DATA registers. Pointer and data accesses go
-+    // through get_byte, in the same order as mos6502.
-+    let op1 = pc.wrapping_add(1);
++    // Pointer and data accesses go through get_byte, in the same order as mos6502.
++    let abs = u16::from_le_bytes([b1, b2]);
 +    let mut ea: u16 = 0;
 +    let mut crossed = false;
 +    let mut next = pc.wrapping_add(match mode {
@@ -574,17 +566,17 @@
 +        _ => 2,
 +    });
 +    match mode {
-+        M_ZP => ea = m.read(op1) as u16,
-+        M_ZPX => ea = m.read(op1).wrapping_add(x) as u16,
-+        M_ZPY => ea = m.read(op1).wrapping_add(y) as u16,
-+        M_ABS => ea = rd16(m, op1),
++        M_ZP => ea = b1 as u16,
++        M_ZPX => ea = b1.wrapping_add(x) as u16,
++        M_ZPY => ea = b1.wrapping_add(y) as u16,
++        M_ABS => ea = abs,
 +        M_ABSX | M_ABSY => {
-+            let base = rd16(m, op1);
++            let base = abs;
 +            ea = base.wrapping_add(if mode == M_ABSX { x } else { y } as u16);
 +            crossed = (base ^ ea) & 0xFF00 != 0;
 +        }
 +        M_IZX | M_IZY => {
-+            let t = m.read(op1).wrapping_add(if mode == M_IZX { x } else { 0 });
++            let t = b1.wrapping_add(if mode == M_IZX { x } else { 0 });
 +            let lo = m.get_byte(t as u16);
 +            let hi = m.get_byte(t.wrapping_add(1) as u16);
 +            ea = u16::from_le_bytes([lo, hi]);
@@ -595,18 +587,18 @@
 +            }
 +        }
 +        M_IND => {
-+            let ptr = rd16(m, op1);
++            let ptr = abs;
 +            let lo = m.get_byte(ptr);
 +            let hi = m.get_byte((ptr & 0xFF00) | (ptr.wrapping_add(1) & 0x00FF));
 +            ea = u16::from_le_bytes([lo, hi]);
 +        }
-+        M_REL => ea = m.read(op1) as i8 as u16,
++        M_REL => ea = b1 as i8 as u16,
 +        _ => {}
 +    }
 +
 +    match kind {
 +        ORA..=BIT => {
-+            let v = if mode == M_IMM { m.read(op1) } else { m.get_byte(ea) };
++            let v = if mode == M_IMM { b1 } else { m.get_byte(ea) };
 +            match kind {
 +                ORA => {
 +                    a |= v;
@@ -761,6 +753,79 @@
 +
 +    *r = Regs { a, x, y, s, p, pc: next };
 +    Some(cycles)
++}
++
++/// Why `run` returned.
++pub enum Exit {
++    /// The frame's cycle budget is used up.
++    Budget,
++    /// The next instruction needs `Emulator::step` (BRK, the HLE far-return
++    /// address, or anything the fast path doesn't cover). It hasn't run.
++    Slow,
++    /// An instruction ran, taking this many cycles (not yet in `cycles_run`
++    /// or the timers), and an interrupt is pending: `handle_interrupts` must
++    /// run before the cycles are counted.
++    Interrupt(u32),
++}
++
++/// Frame-loop counters `run` keeps for `Emulator::run_frame`.
++pub struct Counters {
++    /// Cycles of the frame so far, including halted time.
++    pub cycles_run: u32,
++    /// Cycles toward the next timer tick.
++    pub remainder: u32,
++    /// CPU cycles run here, to add to the CPU's cycle count.
++    pub cpu_cycles: u32,
++    /// Instructions run here.
++    pub steps: u32,
++}
++
++/// The common case of `Emulator::run_frame` as one tight loop: fast-path
++/// instructions with no interrupt pending, halted time and timer ticks, all
++/// in locals (on the Playdate each store to a new heap cache line costs
++/// ~0.5 us). Returns for anything else; see `Exit`.
++#[inline(never)]
++pub fn run(r: &mut Regs, m: &mut Memory, n: &mut Counters, budget: u32, timer_step: u32, hle_return: u16) -> Exit {
++    let mut regs = *r;
++    // The RAM buffer never moves (it is only ever copied into).
++    let ram = m.ram.as_ptr();
++    // SAFETY: every index below is under 0x300 and ram is 32 KiB.
++    let ram_at = |i: usize| unsafe { *ram.add(i) };
++    let mut cycles_run = n.cycles_run;
++    let mut remainder = n.remainder;
++    let mut cpu_cycles = n.cpu_cycles;
++    let mut steps = n.steps;
++    let exit = loop {
++        if cycles_run >= budget {
++            break Exit::Budget;
++        }
++        let cycles = if ram_at(0x200) & 0x08 != 0 {
++            400 // halted until an interrupt
++        } else {
++            if regs.pc == hle_return {
++                break Exit::Slow;
++            }
++            let Some(cycles) = step(&mut regs, m) else { break Exit::Slow };
++            cpu_cycles = cpu_cycles.wrapping_add(cycles);
++            steps = steps.wrapping_add(1);
++            // Emulator::handle_interrupts acts only when one of these is set.
++            if regs.p & 0x04 == 0
++                && (ram_at(0x04) & ram_at(0x23A) & 0x83 != 0 || ram_at(0x05) & ram_at(0x23B) & 0xEF != 0)
++            {
++                break Exit::Interrupt(cycles);
++            }
++            cycles
++        };
++        cycles_run += cycles;
++        remainder += cycles;
++        if remainder >= timer_step {
++            m.update_timers(remainder / timer_step);
++            remainder %= timer_step;
++        }
++    };
++    *r = regs;
++    *n = Counters { cycles_run, remainder, cpu_cycles, steps };
++    exit
 +}
 --- a/src/font.rs
 +++ b/src/font.rs
@@ -1007,7 +1072,7 @@
      }
  
      /// Get mutable references to RAM and Flash for cheat engine
-@@ -215,7 +253,90 @@
+@@ -215,7 +253,113 @@
      }
  
      /// Read a byte from memory
@@ -1030,6 +1095,29 @@
 +            return self.ram[addr as usize];
 +        }
 +        self.read_reference(addr)
++    }
++
++    /// Pointer to the bytes at `pc`, `pc + 1` and `pc + 2` when they are in
++    /// one fast-mapped page (plain loads give the same values as `read`), or
++    /// null. Doesn't fill the page cache; `read` does.
++    #[inline(always)]
++    pub fn code_ptr(&self, pc: u16) -> *const u8 {
++        if pc & 0x0FFF > 0x0FFD {
++            return core::ptr::null();
++        }
++        if pc >= 0x1000 {
++            let b = (pc >> 12) as usize;
++            let ptr = self.page_ptr[b].get();
++            if self.page_key[b].get() == self.bank_switch.banks[b] && !ptr.is_null() {
++                // SAFETY: ptr is a 4 KiB page and pc & 0xFFF <= 0xFFD.
++                return unsafe { ptr.add((pc & 0x0FFF) as usize) };
++            }
++            core::ptr::null()
++        } else if pc >= 0x0400 || (0x0010..0x02FE).contains(&pc) {
++            self.ram[pc as usize..].as_ptr()
++        } else {
++            core::ptr::null()
++        }
 +    }
 +
 +    /// Refills bank `addr >> 12`'s page cache entry, then reads.
@@ -1098,7 +1186,7 @@
          match addr {
              // Page 0 - hardware registers
              0x0000..=0x00FF => self.read_page0(addr),
-@@ -233,7 +354,39 @@
+@@ -233,7 +377,39 @@
      }
  
      /// Write a byte to memory
@@ -1138,7 +1226,7 @@
          match addr {
              0x0000..=0x00FF => self.write_page0(addr, val),
              0x0100..=0x02FF | 0x0400..=0x0FFF => {
-@@ -453,7 +606,7 @@
+@@ -453,7 +629,7 @@
                      self.flash_cycles += 1;
                  } else if val == 0xF0 {
                      // Software ID Exit / CFI Exit
@@ -1147,7 +1235,7 @@
                  }
              }
              1 | 4 => {
-@@ -470,7 +623,7 @@
+@@ -470,7 +646,7 @@
                  match val {
                      0xA0 => {
                          // Byte-Program
@@ -1156,7 +1244,7 @@
                          self.flash_cycles += 1;
                      }
                      0x80 => {
-@@ -478,17 +631,17 @@
+@@ -478,17 +654,17 @@
                      }
                      0x90 => {
                          // Software ID Entry
@@ -1177,7 +1265,7 @@
                          self.flash_cycles = 0;
                      }
                      _ => {}
-@@ -497,7 +650,7 @@
+@@ -497,7 +673,7 @@
              3 => {
                  // 4th Bus Write Cycle
                  if self.flash_cmd == FlashCmd::ByteProgram {
@@ -1186,7 +1274,7 @@
                      self.flash_cycles = 0;
                      // Rotate last 32KiB to the front for save
                      let addr = (addr + 0x8000) % FLASH_SIZE as u32;
-@@ -534,7 +687,7 @@
+@@ -534,7 +710,7 @@
                      }
                      _ => {}
                  }
@@ -1195,7 +1283,7 @@
                  self.flash_cycles = 0;
              }
              _ => {
-@@ -637,6 +790,7 @@
+@@ -637,6 +813,7 @@
  
      /// Restore flash command state from save state
      pub fn set_flash_state(&mut self, cmd: u8, cycles: u8) {
@@ -1203,7 +1291,7 @@
          self.flash_cmd = match cmd {
              1 => FlashCmd::ByteProgram,
              2 => FlashCmd::SoftwareId,
-@@ -658,7 +812,24 @@
+@@ -658,7 +835,24 @@
  }
  
  impl Bus for Memory {
@@ -1228,7 +1316,7 @@
          let value = self.read(address);
          if (registers::DATA1..=registers::DATA4).contains(&address) {
              let channel = (address - registers::DATA1) as usize;
-@@ -668,12 +839,9 @@
+@@ -668,12 +862,9 @@
          }
          value
      }

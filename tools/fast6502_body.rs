@@ -29,11 +29,6 @@ fn nz(p: u8, v: u8) -> u8 {
     (p & !(Z | N)) | (v & N) | if v == 0 { Z } else { 0 }
 }
 
-#[inline(always)]
-fn rd16(m: &Memory, addr: u16) -> u16 {
-    u16::from_le_bytes([m.read(addr), m.read(addr.wrapping_add(1))])
-}
-
 /// CPU registers held outside mos6502's CPU struct, so a frame's worth of
 /// instructions can run with them in locals: on the Playdate every store to a
 /// new heap cache line costs ~0.5 us.
@@ -91,7 +86,17 @@ pub fn step(r: &mut Regs, m: &mut Memory) -> Option<u32> {
     if !(0x0100..=0xFFFC).contains(&pc) {
         return None;
     }
-    let e = TABLE[m.read(pc) as usize];
+    // Opcode and both operand bytes, through one page lookup when the code
+    // sits in a fast-mapped page. Plain reads: with PC in 0x0100..=0xFFFC
+    // these can't touch the side-effecting DATA registers.
+    let code = m.code_ptr(pc);
+    let (opcode, b1, b2) = if code.is_null() {
+        (m.read(pc), m.read(pc.wrapping_add(1)), m.read(pc.wrapping_add(2)))
+    } else {
+        // SAFETY: code_ptr guarantees three readable bytes.
+        unsafe { (*code, *code.add(1), *code.add(2)) }
+    };
+    let e = TABLE[opcode as usize];
     let kind = e & 0x3F;
     let mut p = r.p;
     if kind == SLOW || ((kind == ADC || kind == SBC) && p & D != 0) {
@@ -105,10 +110,8 @@ pub fn step(r: &mut Regs, m: &mut Memory) -> Option<u32> {
     let mut y = r.y;
     let mut s = r.s;
 
-    // Operand bytes are plain reads: with PC in 0x0100..=0xFFFC they can't
-    // touch the side-effecting DATA registers. Pointer and data accesses go
-    // through get_byte, in the same order as mos6502.
-    let op1 = pc.wrapping_add(1);
+    // Pointer and data accesses go through get_byte, in the same order as mos6502.
+    let abs = u16::from_le_bytes([b1, b2]);
     let mut ea: u16 = 0;
     let mut crossed = false;
     let mut next = pc.wrapping_add(match mode {
@@ -117,17 +120,17 @@ pub fn step(r: &mut Regs, m: &mut Memory) -> Option<u32> {
         _ => 2,
     });
     match mode {
-        M_ZP => ea = m.read(op1) as u16,
-        M_ZPX => ea = m.read(op1).wrapping_add(x) as u16,
-        M_ZPY => ea = m.read(op1).wrapping_add(y) as u16,
-        M_ABS => ea = rd16(m, op1),
+        M_ZP => ea = b1 as u16,
+        M_ZPX => ea = b1.wrapping_add(x) as u16,
+        M_ZPY => ea = b1.wrapping_add(y) as u16,
+        M_ABS => ea = abs,
         M_ABSX | M_ABSY => {
-            let base = rd16(m, op1);
+            let base = abs;
             ea = base.wrapping_add(if mode == M_ABSX { x } else { y } as u16);
             crossed = (base ^ ea) & 0xFF00 != 0;
         }
         M_IZX | M_IZY => {
-            let t = m.read(op1).wrapping_add(if mode == M_IZX { x } else { 0 });
+            let t = b1.wrapping_add(if mode == M_IZX { x } else { 0 });
             let lo = m.get_byte(t as u16);
             let hi = m.get_byte(t.wrapping_add(1) as u16);
             ea = u16::from_le_bytes([lo, hi]);
@@ -138,18 +141,18 @@ pub fn step(r: &mut Regs, m: &mut Memory) -> Option<u32> {
             }
         }
         M_IND => {
-            let ptr = rd16(m, op1);
+            let ptr = abs;
             let lo = m.get_byte(ptr);
             let hi = m.get_byte((ptr & 0xFF00) | (ptr.wrapping_add(1) & 0x00FF));
             ea = u16::from_le_bytes([lo, hi]);
         }
-        M_REL => ea = m.read(op1) as i8 as u16,
+        M_REL => ea = b1 as i8 as u16,
         _ => {}
     }
 
     match kind {
         ORA..=BIT => {
-            let v = if mode == M_IMM { m.read(op1) } else { m.get_byte(ea) };
+            let v = if mode == M_IMM { b1 } else { m.get_byte(ea) };
             match kind {
                 ORA => {
                     a |= v;
@@ -304,4 +307,77 @@ pub fn step(r: &mut Regs, m: &mut Memory) -> Option<u32> {
 
     *r = Regs { a, x, y, s, p, pc: next };
     Some(cycles)
+}
+
+/// Why `run` returned.
+pub enum Exit {
+    /// The frame's cycle budget is used up.
+    Budget,
+    /// The next instruction needs `Emulator::step` (BRK, the HLE far-return
+    /// address, or anything the fast path doesn't cover). It hasn't run.
+    Slow,
+    /// An instruction ran, taking this many cycles (not yet in `cycles_run`
+    /// or the timers), and an interrupt is pending: `handle_interrupts` must
+    /// run before the cycles are counted.
+    Interrupt(u32),
+}
+
+/// Frame-loop counters `run` keeps for `Emulator::run_frame`.
+pub struct Counters {
+    /// Cycles of the frame so far, including halted time.
+    pub cycles_run: u32,
+    /// Cycles toward the next timer tick.
+    pub remainder: u32,
+    /// CPU cycles run here, to add to the CPU's cycle count.
+    pub cpu_cycles: u32,
+    /// Instructions run here.
+    pub steps: u32,
+}
+
+/// The common case of `Emulator::run_frame` as one tight loop: fast-path
+/// instructions with no interrupt pending, halted time and timer ticks, all
+/// in locals (on the Playdate each store to a new heap cache line costs
+/// ~0.5 us). Returns for anything else; see `Exit`.
+#[inline(never)]
+pub fn run(r: &mut Regs, m: &mut Memory, n: &mut Counters, budget: u32, timer_step: u32, hle_return: u16) -> Exit {
+    let mut regs = *r;
+    // The RAM buffer never moves (it is only ever copied into).
+    let ram = m.ram.as_ptr();
+    // SAFETY: every index below is under 0x300 and ram is 32 KiB.
+    let ram_at = |i: usize| unsafe { *ram.add(i) };
+    let mut cycles_run = n.cycles_run;
+    let mut remainder = n.remainder;
+    let mut cpu_cycles = n.cpu_cycles;
+    let mut steps = n.steps;
+    let exit = loop {
+        if cycles_run >= budget {
+            break Exit::Budget;
+        }
+        let cycles = if ram_at(0x200) & 0x08 != 0 {
+            400 // halted until an interrupt
+        } else {
+            if regs.pc == hle_return {
+                break Exit::Slow;
+            }
+            let Some(cycles) = step(&mut regs, m) else { break Exit::Slow };
+            cpu_cycles = cpu_cycles.wrapping_add(cycles);
+            steps = steps.wrapping_add(1);
+            // Emulator::handle_interrupts acts only when one of these is set.
+            if regs.p & 0x04 == 0
+                && (ram_at(0x04) & ram_at(0x23A) & 0x83 != 0 || ram_at(0x05) & ram_at(0x23B) & 0xEF != 0)
+            {
+                break Exit::Interrupt(cycles);
+            }
+            cycles
+        };
+        cycles_run += cycles;
+        remainder += cycles;
+        if remainder >= timer_step {
+            m.update_timers(remainder / timer_step);
+            remainder %= timer_step;
+        }
+    };
+    *r = regs;
+    *n = Counters { cycles_run, remainder, cpu_cycles, steps };
+    exit
 }
