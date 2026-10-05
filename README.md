@@ -193,8 +193,8 @@ Set `ARM_TOOLCHAIN=/path/to/bin` if the Arm toolchain isn't under `/Applications
   [Dirty Optimization Secrets (C for Playdate)](https://devforum.play.date/t/dirty-optimization-secrets-c-for-playdate/23011)
   on the Playdate developer forum, and the CrankBoy developers'
   [interview](https://www.readonlymemo.com/playdate-crankboy-emulator-interview).
-- Bundled: BBK A4980 system ROMs; 伏魔记, 金庸群侠传 and 三国霸业 (BBK and its developers),
-  英雄坛说 (Caizi Studio, 才子工作室) and 十字之门 (翼王, Yiwang), with gopherbone's English
+- Bundled: BBK A4980 system ROMs; 伏魔记 and 三国霸业 (BBK and its developers), 金庸群侠传 (BOSS
+  Studio, BOSS工作室), 英雄坛说 (Caizi Studio, 才子工作室) and 十字之门 (翼王, Yiwang), with gopherbone's English
   translations Demonbane Chronicle v0.4, Heroes of Jin Yong v0.3, Heroes' Altar v0.2, Cross
   Entry v0.2 and Three Kingdoms: Hegemony v0.1. Game titles are drawn
   with the 16×16 GB2312 font from the bundled `8.BIN`; the lookup table is generated with
@@ -203,6 +203,6 @@ Set `ARM_TOOLCHAIN=/path/to/bin` if the Arm toolchain isn't under `/Applications
 ## License
 
 The code is GPL-3.0-or-later, the same as BBKEmu; see [LICENSE](LICENSE). The bundled BBK system
-ROMs, 伏魔记, 金庸群侠传 and 三国霸业 belong to BBK (and its developers), 英雄坛说 to Caizi Studio
-and 十字之门 to 翼王 (Yiwang); they are included as abandonware. Demonbane Chronicle, Heroes of Jin
+ROMs, 伏魔记 and 三国霸业 belong to BBK (and its developers), 金庸群侠传 to BOSS Studio, 英雄坛说
+to Caizi Studio and 十字之门 to 翼王 (Yiwang); they are included as abandonware. Demonbane Chronicle, Heroes of Jin
 Yong, Heroes' Altar, Cross Entry and Three Kingdoms: Hegemony are fan translations.
