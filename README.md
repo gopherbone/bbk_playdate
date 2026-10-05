@@ -12,8 +12,8 @@ the `upstream/` submodule, then patched at build time to run without the Rust st
 behind a small C frontend.
 
 It comes ready to play. The release bundles the A4980 system ROMs and five English fan
-translations: **Demonbane Chronicle v0.3** (伏魔记), **Heroes of Jin Yong v0.2** (金庸群侠传),
-**Heroes' Altar v0.1** (英雄坛说), **Cross Entry v0.1** (十字之门) and **Three Kingdoms: Hegemony
+translations: **Demonbane Chronicle v0.4** (伏魔记), **Heroes of Jin Yong v0.3** (金庸群侠传),
+**Heroes' Altar v0.2** (英雄坛说), **Cross Entry v0.2** (十字之门) and **Three Kingdoms: Hegemony
 v0.1** (三国霸业).
 
 ![Demonbane Chronicle on the Device border, styled after the dictionaries](docs/device-frame.png)
@@ -195,8 +195,8 @@ Set `ARM_TOOLCHAIN=/path/to/bin` if the Arm toolchain isn't under `/Applications
   [interview](https://www.readonlymemo.com/playdate-crankboy-emulator-interview).
 - Bundled: BBK A4980 system ROMs; 伏魔记, 金庸群侠传 and 三国霸业 (BBK and its developers),
   英雄坛说 (Caizi Studio, 才子工作室) and 十字之门 (翼王, Yiwang), with gopherbone's English
-  translations Demonbane Chronicle v0.3, Heroes of Jin Yong v0.2, Heroes' Altar v0.1, Cross
-  Entry v0.1 (plus a later dialogue fix) and Three Kingdoms: Hegemony v0.1. Game titles are drawn
+  translations Demonbane Chronicle v0.4, Heroes of Jin Yong v0.3, Heroes' Altar v0.2, Cross
+  Entry v0.2 and Three Kingdoms: Hegemony v0.1. Game titles are drawn
   with the 16×16 GB2312 font from the bundled `8.BIN`; the lookup table is generated with
   Python's `gb2312` codec.
 
