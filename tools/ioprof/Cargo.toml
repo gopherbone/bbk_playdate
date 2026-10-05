@@ -1,0 +1,11 @@
+[package]
+name = "ioprof"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Tallies writes to the BBK's I/O registers while a game runs (sound hardware investigation)"
+
+[dependencies]
+bbkemu-core = { path = "../../gen/bbkemu-core", features = ["trace"] }
+
+[workspace]

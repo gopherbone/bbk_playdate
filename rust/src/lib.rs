@@ -144,6 +144,7 @@ pub struct BBKEmulator {
     /// The last battery diff and the flash write count it was taken at, so an
     /// unchanged flash isn't diffed again (2 MB of slow memory on device).
     battery: Option<(u32, Vec<u8>)>,
+    synth: Synth,
 }
 
 unsafe fn emu_mut<'a>(emu: *mut BBKEmulator) -> Option<&'a mut BBKEmulator> {
@@ -181,6 +182,7 @@ pub extern "C" fn bbk_create(model: u32) -> *mut BBKEmulator {
         lcd_ram: vec![0; LCD_RAM.len() + 1],
         export: Vec::new(),
         battery: None,
+        synth: Synth::new(),
     }))
 }
 
@@ -345,6 +347,128 @@ pub extern "C" fn bbk_bench_interpreter(mode: u32, count: u32) -> u32 {
             emu.run_frame();
         }
         (emu.cpu.cycles() - before) as u32
+    }
+}
+
+// MARK: Sound
+
+/// Output sample rate (the Playdate's).
+const SAMPLE_RATE: u64 = 44_100;
+const CPU_HZ: u64 = 4_000_000;
+
+/// The tone channels' input clock. Fitted, not measured: with the counter
+/// model below it puts the songs in the OS ROM on equal temperament with
+/// $AA = A4 = 440 Hz (and $C2 = A5, $A0 = A6). The octave is a guess.
+const TONE_CLOCK: f64 = 183_040.0;
+
+/// Period of the polynomial counter behind each tone value, in clock ticks.
+///
+/// The OS songs' note values don't fit any linear or reciprocal divider, but
+/// they do fit an 8-bit LFSR (x^8+x^4+x^3+x^2+1, shifting left) that counts
+/// from the written value to a fixed state: the period is the number of steps.
+/// 0 never advances, which is why the songs use it for rests.
+fn tone_periods() -> [u16; 256] {
+    let step = |s: u8| (s << 1) | ((s & 0x8E).count_ones() as u8 & 1);
+    let mut periods = [0u16; 256];
+    for (v, period) in periods.iter_mut().enumerate().skip(1) {
+        let mut s = v as u8;
+        let mut n = 0u16;
+        while s != 0x10 {
+            s = step(s);
+            n += 1;
+        }
+        *period = n + 5;
+    }
+    periods
+}
+
+/// Two square-wave channels, rendered from the core's log of sound register
+/// changes.
+struct Synth {
+    /// Phase increment per output sample for each tone value (0: silent).
+    steps: [u32; 256],
+    phase: [u32; 2],
+    /// Current $22C, $22D, AUDCON.
+    regs: (u8, u8, u8),
+    /// Core audio clock (CPU cycles) up to which samples have been rendered.
+    clock: u32,
+    /// Fractional output sample carried between renders (in cycles * rate).
+    frac: u64,
+}
+
+impl Synth {
+    fn new() -> Self {
+        let periods = tone_periods();
+        let mut steps = [0u32; 256];
+        for v in 1..256 {
+            let freq = TONE_CLOCK / (2.0 * periods[v] as f64);
+            steps[v] = (freq / SAMPLE_RATE as f64 * 4_294_967_296.0) as u32;
+        }
+        Self { steps, phase: [0; 2], regs: (0, 0, 0), clock: 0, frac: 0 }
+    }
+
+    fn sample(&mut self, volume: i32) -> i16 {
+        let (c1, c2, audcon) = self.regs;
+        let mut out = 0;
+        for (i, (v, on)) in [(c1, audcon & 0x80 != 0), (c2, audcon & 0x40 != 0)].into_iter().enumerate() {
+            let step = self.steps[v as usize];
+            if on && step != 0 {
+                self.phase[i] = self.phase[i].wrapping_add(step);
+                out += if self.phase[i] & 0x8000_0000 != 0 { volume } else { -volume };
+            }
+        }
+        out as i16
+    }
+}
+
+/// Renders the sound for the CPU time run since the last call into `out`
+/// (mono, 44.1 kHz) and returns the number of samples written; time beyond
+/// `cap` samples is dropped. `volume` is each channel's amplitude.
+///
+/// # Safety
+/// `out` must point to `cap` writable samples.
+#[no_mangle]
+pub unsafe extern "C" fn bbk_audio_render(emu: *mut BBKEmulator, out: *mut i16, cap: usize, volume: i32) -> usize {
+    let Some(e) = emu_mut(emu) else { return 0 };
+    let mem = e.emu.cpu.memory_mut();
+    let now = mem.audio_clock;
+    let events = core::mem::take(&mut mem.audio_events);
+    let s = &mut e.synth;
+    let elapsed = now.wrapping_sub(s.clock) as u64;
+    let total = elapsed * SAMPLE_RATE + s.frac;
+    let n = ((total / CPU_HZ) as usize).min(cap);
+    s.frac = total % CPU_HZ;
+    let out = if out.is_null() { &mut [][..] } else { slice::from_raw_parts_mut(out, n) };
+    let start = s.clock;
+    let mut events = events.into_iter().peekable();
+    for (i, sample) in out.iter_mut().enumerate() {
+        // Apply register changes logged up to this sample's CPU time.
+        let t = (i as u64 * CPU_HZ / SAMPLE_RATE) as u32;
+        while let Some(&(at, c1, c2, audcon)) = events.peek() {
+            if at.wrapping_sub(start) > t {
+                break;
+            }
+            s.regs = (c1, c2, audcon);
+            events.next();
+        }
+        *sample = s.sample(volume);
+    }
+    for (_, c1, c2, audcon) in events {
+        s.regs = (c1, c2, audcon);
+    }
+    s.clock = now;
+    n
+}
+
+/// Writes a byte of emulated RAM (debugging and test tools).
+///
+/// # Safety
+/// `emu` must be a live handle or NULL.
+#[doc(hidden)]
+#[no_mangle]
+pub unsafe extern "C" fn bbk_debug_poke(emu: *mut BBKEmulator, addr: u16, value: u8) {
+    if let Some(e) = emu_mut(emu) {
+        e.emu.cpu.memory_mut().ram[addr as usize & 0x7FFF] = value;
     }
 }
 

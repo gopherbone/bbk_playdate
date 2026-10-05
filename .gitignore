@@ -5,3 +5,4 @@ BBKEmu.pdx/
 Source/pdex.*
 tools/difftest/target/
 tools/memprof/target/
+tools/ioprof/target/

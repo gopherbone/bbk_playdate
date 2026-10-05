@@ -215,6 +215,9 @@ pub fn step(r: &mut Regs, m: &mut Memory) -> Option<u32> {
     // SAFETY: profiling builds are single-threaded host tools.
     unsafe {
         OPCODE_COUNTS[opcode as usize] += 1;
+        if let Some(hook) = crate::memory::EXEC_HOOK {
+            hook(pc, m.physical_of(pc));
+        }
     }
     if let Some(cycles) = hot(r, m, opcode, b1, b2) {
         return Some(cycles);

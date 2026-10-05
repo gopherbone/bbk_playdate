@@ -34,6 +34,10 @@ void bbk_render(BBKEmulator* emu, uint8_t* frame, size_t rowbytes, uint32_t x0, 
                 bool landscape, uint8_t ghosting, int* first_row, int* last_row);
 void bbk_reset_ghosting(BBKEmulator* emu);
 
+// Renders the sound produced since the last call (mono, 44.1 kHz) into `out`;
+// returns the number of samples. `volume` is each channel's amplitude.
+size_t bbk_audio_render(BBKEmulator* emu, int16_t* out, size_t cap, int32_t volume);
+
 // Exports return a buffer owned by the emulator, valid until the next export
 // or bbk_release_export; NULL if there is nothing to export.
 const uint8_t* bbk_battery_export(BBKEmulator* emu, size_t* len);

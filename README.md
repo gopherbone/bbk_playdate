@@ -29,6 +29,7 @@ translations: **Demonbane Chronicle v0.3** (伏魔记), **Heroes of Jin Yong v0.
 - Battery saves are written automatically; 3 save-state slots per game.
 - An on-screen keypad (crank or D-pad) for every BBK key.
 - A white or black border, or a Device frame styled after the dictionaries themselves.
+- Sound: the OS's music player and key beeps, which no other BBK emulator plays (see below).
 
 ## Install
 
@@ -60,7 +61,7 @@ flash emulation (below), which changes the file's layout.
 | Ⓐ | Enter |
 | Ⓑ | Exit |
 | Menu → **keypad** | Any key: move with the crank or D-pad, Ⓐ presses it |
-| Menu → **options** | Save/load state, state slot, portrait/landscape, border (white, black or device), ghosting, model, performance overlay, reset |
+| Menu → **options** | Save/load state, state slot, portrait/landscape, border (white, black or device), ghosting, sound, model, performance overlay, reset |
 | Menu → **game list** | Back to the list (saves first) |
 
 For landscape games, hold the Playdate with the crank on top; the D-pad turns with it.
@@ -114,6 +115,30 @@ automated playthrough found them. Without them the games can't be played through
 Battery saves from v0.2.1 and earlier, and from the macOS app, used the old flash layout. They are
 renamed to `.bbksav.old` when the game starts, and the game starts fresh. `make check` includes a
 two-slot save and load round trip.
+
+## Sound
+
+Neither upstream BBKEmu nor gam4980 emulates sound, and there's no public documentation for the
+chip, so this was reverse-engineered from the OS ROM:
+
+- **Music and the key beep come from the OS.** Games ask it to play one of 12 songs stored in
+  the OS ROM. The player runs in the **main-timer (MT) interrupt**, which ticks at 128 Hz
+  (32768 Hz / 256). Each tick it reads the next event of the song through DMA channel 3: a note
+  length (loaded into `MTCT`, so the interrupt comes back when the note ends) and new values for
+  the two **tone registers**, `$22C` and `$22D`. `AUDCON` bits 7 and 6 enable the channels. The
+  key beep is the same mechanism playing tone `$EC` for 16 ticks. The 128 Hz rate is inferred
+  from the songs' duration tables, which come out as sixteenth to whole notes at 128 BPM.
+- **The tone registers drive polynomial counters.** Note values in the songs fit no linear or
+  reciprocal divider, but they fit an 8-bit LFSR (x⁸+x⁴+x³+x²+1) whose period is the number of
+  steps from the written value to a fixed state. That puts the songs on equal temperament to
+  within a tenth of a semitone, with all three A's at exact factor-of-two periods. Value 0 never
+  advances, which is why songs use it for rests.
+
+What's still a guess: the absolute clock (tuned so `$AA` is A4 = 440 Hz; the true octave may
+differ), the exact counter details, the waveform (plain square waves), and the volume. Upstream
+bumped `MTCT` every 400 cycles and never raised its interrupt, which is why it was silent.
+Demonbane plays music only on maps that have a track and with Game → Setup → Music on.
+`tools/ioprof` is the profiler used to find all this.
 
 ## Building
 

@@ -104,6 +104,7 @@ typedef struct {
     int ghosting;   // 0 off, 1 low, 2 high
     int show_speed;
     int border;     // BORDER_*
+    int sound;
 } Settings;
 
 enum { BORDER_WHITE, BORDER_BLACK, BORDER_DEVICE, BORDER_COUNT };
@@ -114,7 +115,7 @@ typedef struct {
     int slot;
 } GameConfig;
 
-static Settings settings = {1, 0, BORDER_WHITE};
+static Settings settings = {1, 0, BORDER_WHITE, 1};
 
 // Parses "key=value" lines, calling `apply` for each.
 static void read_kv(const char* path, void (*apply)(const char* key, int value, void* ud), void* ud) {
@@ -146,12 +147,13 @@ static void apply_setting(const char* key, int value, void* ud) {
     if (!strcmp(key, "ghosting")) settings.ghosting = value < 0 ? 0 : value > 2 ? 2 : value;
     else if (!strcmp(key, "show_speed")) settings.show_speed = value != 0;
     else if (!strcmp(key, "border")) settings.border = value >= 0 && value < BORDER_COUNT ? value : BORDER_WHITE;
+    else if (!strcmp(key, "sound")) settings.sound = value != 0;
 }
 
 static void save_settings(void) {
     char buf[96];
-    int n = snprintf(buf, sizeof buf, "ghosting=%d\nshow_speed=%d\nborder=%d\n", settings.ghosting,
-                     settings.show_speed, settings.border);
+    int n = snprintf(buf, sizeof buf, "ghosting=%d\nshow_speed=%d\nborder=%d\nsound=%d\n", settings.ghosting,
+                     settings.show_speed, settings.border, settings.sound);
     write_file("settings.txt", (uint8_t*)buf, n);
 }
 
@@ -342,6 +344,52 @@ static void message_update(void) {
     pd->graphics->drawText("Ⓐ OK", strlen("Ⓐ OK"), kUTF8Encoding, 16, 218);
 }
 
+// MARK: Sound
+
+// Emulated sound flows from the game task (bbk_audio_render after each batch
+// of frames) to the audio callback through this single-producer,
+// single-consumer ring.
+#define AUDIO_RING 16384            // samples; a power of two
+#define AUDIO_MAX_BACKLOG 6000      // ~136 ms; beyond this, drop to stay in sync
+#define AUDIO_VOLUME 5000           // per channel
+static int16_t audio_ring[AUDIO_RING];
+static volatile uint32_t audio_write, audio_read;
+static SoundSource* audio_source;
+
+static int audio_callback(void* ctx, int16_t* left, int16_t* right, int len) {
+    (void)ctx;
+    (void)right;
+    uint32_t r = audio_read, w = audio_write;
+    int i = 0;
+    for (; i < len && r != w; i++, r++) left[i] = audio_ring[r & (AUDIO_RING - 1)];
+    for (; i < len; i++) left[i] = 0;
+    audio_read = r;
+    return 1;
+}
+
+static void audio_start(void) {
+    audio_read = audio_write = 0;
+    if (!audio_source) audio_source = pd->sound->addSource(audio_callback, NULL, 0);
+}
+
+static void audio_stop(void) {
+    if (audio_source) {
+        pd->sound->removeSource(audio_source);
+        audio_source = NULL;
+    }
+}
+
+// Moves the sound emulated since the last call into the ring.
+static void audio_pump(BBKEmulator* emu) {
+    static int16_t buf[4096];
+    size_t n = bbk_audio_render(emu, buf, sizeof buf / sizeof buf[0], AUDIO_VOLUME);
+    if (!settings.sound || !audio_source) return;
+    uint32_t w = audio_write;
+    if (w - audio_read > AUDIO_MAX_BACKLOG) audio_read = w - AUDIO_MAX_BACKLOG / 2;
+    for (size_t i = 0; i < n && w - audio_read < AUDIO_RING; i++, w++) audio_ring[w & (AUDIO_RING - 1)] = buf[i];
+    audio_write = w;
+}
+
 // MARK: Game session
 
 static BBKEmulator* emu;
@@ -466,6 +514,7 @@ static void end_game(void) {
     last_battery = NULL;
     pd->system->removeAllMenuItems();
     pd->display->setRefreshRate(REFRESH_RATE);
+    audio_stop();
 }
 
 static void menu_keypad(void* ud);
@@ -567,6 +616,7 @@ static void start_game(const char* name) {
     toast_frames = 0;
     last_ms = pd->system->getCurrentTimeMilliseconds();
     game_add_menu_items();
+    audio_start();
     screen = SCREEN_GAME;
     needs_redraw = 1;
     if (moved_aside) {
@@ -755,6 +805,7 @@ static void game_update(void) {
 
     float t0 = pd->system->getElapsedTime();
     int ran = frames > 0 ? bbk_run_frames(emu, frames, before_frame, NULL) : 0;
+    audio_pump(emu);
     if (!bbk_is_running(emu)) {
         end_game();
         show_message("Game ended", "The game exited back to the dictionary menu.", SCREEN_PICKER);
@@ -880,8 +931,8 @@ static void keypad_update(void) {
 // MARK: Options
 
 enum {
-    OPT_SAVE, OPT_LOAD, OPT_SLOT, OPT_DISPLAY, OPT_BORDER, OPT_GHOSTING, OPT_MODEL, OPT_SPEED, OPT_RESET, OPT_QUIT,
-    OPT_COUNT
+    OPT_SAVE, OPT_LOAD, OPT_SLOT, OPT_DISPLAY, OPT_BORDER, OPT_GHOSTING, OPT_SOUND, OPT_MODEL, OPT_SPEED, OPT_RESET,
+    OPT_QUIT, OPT_COUNT
 };
 
 static int opt_selected;
@@ -896,6 +947,7 @@ static void option_label(int i, char* out, size_t cap) {
     case OPT_DISPLAY: snprintf(out, cap, "Display\t%s", config.landscape ? "Landscape" : "Portrait"); break;
     case OPT_BORDER: snprintf(out, cap, "Border\t%s", border_names[settings.border]); break;
     case OPT_GHOSTING: snprintf(out, cap, "LCD ghosting\t%s", ghost_names[settings.ghosting]); break;
+    case OPT_SOUND: snprintf(out, cap, "Sound\t%s", settings.sound ? "On" : "Off"); break;
     case OPT_MODEL: snprintf(out, cap, "Model (A switches, restarts)\t%s", model_name(config.model)); break;
     case OPT_SPEED: snprintf(out, cap, "Show performance\t%s", settings.show_speed ? "On" : "Off"); break;
     case OPT_RESET: snprintf(out, cap, "Reset game"); break;
@@ -908,7 +960,7 @@ static void options_draw(void) {
     pd->graphics->setFont(font);
     draw_name(font, game_name, 12, 8, 388, 0);
     pd->graphics->drawLine(12, 30, 388, 30, 1, kColorBlack);
-    int row_h = 20, y0 = 36;
+    int row_h = 18, y0 = 36;
     for (int i = 0; i < OPT_COUNT; i++) {
         char label[96];
         option_label(i, label, sizeof label);
@@ -965,6 +1017,10 @@ static void options_update(void) {
             break;
         case OPT_BORDER:
             settings.border = (settings.border + dir + BORDER_COUNT) % BORDER_COUNT;
+            save_settings();
+            break;
+        case OPT_SOUND:
+            settings.sound = !settings.sound;
             save_settings();
             break;
         case OPT_SPEED:
