@@ -11,9 +11,9 @@ It runs [BBKEmu](https://github.com/AloysHF/BBKEmu)'s emulator core (pulled in u
 the `upstream/` submodule, then patched at build time to run without the Rust standard library)
 behind a small C frontend.
 
-It comes ready to play. The release bundles the A4980 system ROMs and three English fan
-translations: **Demonbane Chronicle v0.3** (伏魔记), **Heroes of Jin Yong v0.2** (金庸群侠传) and
-**Heroes' Altar v0.1** (英雄坛说).
+It comes ready to play. The release bundles the A4980 system ROMs and four English fan
+translations: **Demonbane Chronicle v0.3** (伏魔记), **Heroes of Jin Yong v0.2** (金庸群侠传),
+**Heroes' Altar v0.1** (英雄坛说) and **Cross Entry v0.1** (十字之门).
 
 ![Demonbane Chronicle on the Device border, styled after the dictionaries](docs/device-frame.png)
 
@@ -37,7 +37,7 @@ Download `BBKEmu.pdx.zip` from the [latest release](../../releases/latest) and e
 [play.date/account/sideload](https://play.date/account/sideload/), or unzip it into the `Games`
 folder of the Playdate's data disk.
 
-All three translations are in the game list straight away. To add more games, run BBKEmu once so it
+All four translations are in the game list straight away. To add more games, run BBKEmu once so it
 creates its folders, then reboot the Playdate to its data disk (Settings → System → Reboot to
 Data Disk) and open the folder in `Data/` ending in `com.gopherbone.bbkemu` (sideloaded games
 get a `user.` prefix):
@@ -187,14 +187,15 @@ Set `ARM_TOOLCHAIN=/path/to/bin` if the Arm toolchain isn't under `/Applications
   [Dirty Optimization Secrets (C for Playdate)](https://devforum.play.date/t/dirty-optimization-secrets-c-for-playdate/23011)
   on the Playdate developer forum, and the CrankBoy developers'
   [interview](https://www.readonlymemo.com/playdate-crankboy-emulator-interview).
-- Bundled: BBK A4980 system ROMs; 伏魔记 and 金庸群侠传 (BBK) and 英雄坛说 (Caizi Studio,
-  才子工作室), with gopherbone's English translations Demonbane Chronicle v0.3, Heroes of Jin
-  Yong v0.2 and Heroes' Altar v0.1. Game titles are drawn
+- Bundled: BBK A4980 system ROMs; 伏魔记 and 金庸群侠传 (BBK), 英雄坛说 (Caizi Studio,
+  才子工作室) and 十字之门 (翼王, Yiwang), with gopherbone's English translations Demonbane
+  Chronicle v0.3, Heroes of Jin Yong v0.2, Heroes' Altar v0.1 and Cross Entry v0.1. Game titles are drawn
   with the 16×16 GB2312 font from the bundled `8.BIN`; the lookup table is generated with
   Python's `gb2312` codec.
 
 ## License
 
 The code is GPL-3.0-or-later, the same as BBKEmu; see [LICENSE](LICENSE). The bundled BBK system
-ROMs, 伏魔记 and 金庸群侠传 belong to BBK and 英雄坛说 to Caizi Studio; they are included as
-abandonware. Demonbane Chronicle, Heroes of Jin Yong and Heroes' Altar are fan translations.
+ROMs, 伏魔记 and 金庸群侠传 belong to BBK, 英雄坛说 to Caizi Studio and 十字之门 to 翼王 (Yiwang);
+they are included as abandonware. Demonbane Chronicle, Heroes of Jin Yong, Heroes' Altar and
+Cross Entry are fan translations.
