@@ -1,5 +1,11 @@
 # BBKEmu for Playdate
 
+> **Made with AI.** This port was written by an AI: Anthropic's Claude (Claude Code, running
+> Claude Opus 5.5), working with and directed by gopherbone, who tested it on a real Playdate.
+> That covers the code, tests, build setup, screenshots and this README. Claude also drove the
+> device over USB to install builds, run benchmarks and read its profiler. Commits it made
+> carry a `Co-Authored-By: Claude` trailer. Sources are credited [below](#sources-and-credits).
+
 Play BBK (步步高) A4980/A4988 electronic-dictionary games on a [Playdate](https://play.date).
 It runs [BBKEmu](https://github.com/AloysHF/BBKEmu)'s emulator core (pulled in unmodified as
 the `upstream/` submodule, then patched at build time to run without the Rust standard library)
@@ -61,20 +67,23 @@ options if a game needs the A4988.
 
 ## Performance
 
-Not full speed yet. The dictionaries ran a 6502 at 4 MHz, about 21,000 instructions per 60 Hz
-frame. On a Rev B Playdate, emulating a frame of Demonbane's title screen takes about 39 ms,
-against a budget of 16.7 ms, so games run at roughly 40% speed. The unmodified core took about
-194 ms.
+Full speed. The dictionaries ran a 6502 at 4 MHz, about 21,000 instructions per 60 Hz frame.
+On a Rev B Playdate, emulating a frame of Demonbane's title screen now takes about 14 ms against
+a budget of 16.7 ms. The unmodified core took about 194 ms.
 
 The Playdate's main memory is slow external PSRAM: a cache miss costs about 0.9 µs and every
 store to a new cache line about 0.56 µs. The game task's stack is in fast tightly-coupled memory,
-but there is only about 8 KB of it. The speedups so far:
+but there is only about 8 KB of it. So the speedups are mostly about touching slow memory less:
 
-- **A compact fast path for the documented 6502 opcodes** (`tools/gen_fast6502.py`) instead of
-  mos6502's generic decoder. Everything it doesn't cover still runs through mos6502.
-- **A frame loop that keeps CPU registers, cycle counts and timer state in locals**, writing
-  them back only for interrupts, BRK and fallbacks.
-- **Inlined fast paths for RAM, flash and ROM reads and writes.**
+- **A fast path for the documented 6502 opcodes** (`tools/gen_fast6502.py`) instead of
+  mos6502's generic decoder: dedicated code for the 17 opcodes that are ~80% of what games
+  execute, then a compact table-driven path. Everything else still runs through mos6502.
+- **One tight inner loop** (`fast6502::run`) that keeps CPU registers, cycle counts and timer
+  state in locals for the whole frame, returning only for interrupts, BRK and fallbacks.
+- **A per-bank page cache**: a memory access is a compare and a load. Opcode and operands come
+  through one lookup.
+- **Rendering only rows that changed**, skipping the dither once ghosting has settled.
+- **Battery autosave that only diffs flash when it has been written.**
 - **`opt-level = "s"`.** Smaller code measured faster than `-O3`.
 
 `make check` compares all of these against the original code: memory accesses exhaustively,
@@ -122,14 +131,6 @@ Set `ARM_TOOLCHAIN=/path/to/bin` if the Arm toolchain isn't under `/Applications
 - `Source/`: copied into the `.pdx` by `pdc`: the bundled ROMs (`ROMs/A4980/`) and games
   (`Bundled/`; a separate folder because the Data folder's `Games/` hides the pdx's own).
 - `docs/`: screenshots, rendered from the emulator's frame buffer.
-
-## AI use
-
-This port was written by an AI: Anthropic's Claude (Claude Code, running Claude Opus 5.5),
-working with and directed by gopherbone, who tested it on a real Playdate. That covers the
-code, tests, build setup, screenshots and this README. Claude also drove the device over USB
-to install builds, run benchmarks and read its profiler. Commits it made carry a
-`Co-Authored-By: Claude` trailer.
 
 ## Sources and credits
 
