@@ -4,6 +4,9 @@
 //! - whole games in lockstep: fast frame loop vs the original loop on mos6502
 //!
 //! Usage: difftest [iterations per opcode] [game.gam ...]  (ROMS=dir with 8.BIN and E.BIN)
+//! Lockstep options (environment): STATE=file starts from a save state;
+//! TITLE_IDLE=n idles n frames then taps Enter every 2 s; REF_ONLY=1 runs
+//! the reference on both sides; TRACE_FRAMES=1 prints the CPU every frame.
 use bbkemu_core::cpu::CpuWrapper;
 use bbkemu_core::input::BbkKey;
 use bbkemu_core::memory::Memory;
@@ -83,23 +86,50 @@ fn random_ops(iters: usize) -> usize {
 }
 
 fn lockstep(game: &str, frames: u64) -> bool {
+    lockstep_keys(game, frames, |f| if f % 50 == 10 { Some(true) } else if f % 50 == 14 { Some(false) } else { None })
+}
+
+/// `keys(frame)`: Some(true) to press the next key in the cycle, Some(false) to release.
+fn lockstep_keys(game: &str, frames: u64, keys_at: impl Fn(u64) -> Option<bool>) -> bool {
     let rom = std::env::var("ROMS").unwrap();
     let r8 = std::fs::read(format!("{rom}/8.BIN")).unwrap();
     let re = std::fs::read(format!("{rom}/E.BIN")).unwrap();
     let g = std::fs::read(game).unwrap();
     let mut emus: Vec<Emulator> = (0..2).map(|_| { let mut e = Emulator::new(&MODEL_4980); e.load_rom_8(&r8); e.load_rom_e(&re); e }).collect();
     emus[1].cpu.reference = true;
+    if std::env::var("REF_ONLY").is_ok() { emus[0].cpu.reference = true; }
     for e in emus.iter_mut() { e.load_gam(&g).unwrap(); }
-    let keys = [BbkKey::Enter, BbkKey::Down, BbkKey::Enter, BbkKey::Right, BbkKey::Enter, BbkKey::Up, BbkKey::Left, BbkKey::Enter];
+    if let Ok(path) = std::env::var("STATE") {
+        // Same restore as the Playdate glue's bbk_state_load.
+        let state = bbkemu_core::save::SaveState::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        for e in emus.iter_mut() {
+            e.load_save_state(&state).unwrap();
+            let regs = &mut e.cpu.inner.registers;
+            regs.accumulator = state.cpu.a;
+            regs.index_x = state.cpu.x;
+            regs.index_y = state.cpu.y;
+            regs.status = mos6502::registers::Status::from_bits_truncate(state.cpu.status);
+            let banks = &mut e.cpu.memory_mut().bank_switch;
+            for (dst, &src) in banks.banks.iter_mut().zip(state.bank_switch.banks.iter()) { *dst = src; }
+            banks.set_selected(state.bank_switch.selected);
+        }
+        println!("loaded state: pc {:04X} sp {:02X} p {:02X}", emus[0].cpu.pc(), emus[0].cpu.sp(), emus[0].cpu.status());
+    }
+    let keys: Vec<BbkKey> = if std::env::var("TITLE_IDLE").is_ok() { vec![BbkKey::Enter] } else {
+        vec![BbkKey::Enter, BbkKey::Down, BbkKey::Enter, BbkKey::Right, BbkKey::Enter, BbkKey::Up, BbkKey::Left, BbkKey::Enter] };
     let t = std::time::Instant::now();
     let mut times = [0f64; 2];
     for f in 0..frames {
         for (i, e) in emus.iter_mut().enumerate() {
-            if f % 50 == 10 { e.key_down(keys[(f / 50) as usize % keys.len()]); }
-            if f % 50 == 14 { e.key_up(); }
+            match keys_at(f) {
+                Some(true) => e.key_down(keys[(f / 50) as usize % keys.len()]),
+                Some(false) => e.key_up(),
+                None => {}
+            }
             let t0 = std::time::Instant::now();
             e.run_frame();
             times[i] += t0.elapsed().as_secs_f64();
+            if std::env::var("TRACE_FRAMES").is_ok() && i == 1 { eprintln!("frame {f}: pc {:04X} sp {:02X} p {:02X} cycles {}", e.cpu.pc(), e.cpu.sp(), e.cpu.status(), e.cpu.cycles()); }
         }
         let (x, y) = (&emus[0], &emus[1]);
         if state(&x.cpu) != state(&y.cpu) || x.cpu.memory().ram != y.cpu.memory().ram || x.cpu.memory().flash != y.cpu.memory().flash || x.is_running() != y.is_running() {
@@ -183,6 +213,17 @@ fn main() {
     let iters: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(2000);
     let fails = random_ops(iters);
     println!("random single-step: {} opcodes with mismatches", fails);
+    if std::env::var("TITLE_IDLE").is_ok() {
+        // Sit on the title for a while, then tap Enter every 2 s, like on device.
+        for g in std::env::args().skip(2) {
+            let start: u64 = std::env::var("TITLE_IDLE").unwrap().parse().unwrap_or(3600);
+            lockstep_keys(&g, start + 3000, |f| {
+                if f < start { return None; }
+                match (f - start) % 120 { 0 => Some(true), 6 => Some(false), _ => None }
+            });
+        }
+        return;
+    }
     if std::env::var("COUNT").is_ok() { for g in std::env::args().skip(2) { count(&g); } return; }
     for g in std::env::args().skip(2) { lockstep(&g, 6000); }
 }

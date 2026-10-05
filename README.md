@@ -83,6 +83,14 @@ loop running on mos6502. Turn on **Show performance** in options to see the fram
 device. Its `bench` figure averages emulated frames 300 to 599, so builds can be compared on
 identical work.
 
+### Fix to upstream behaviour
+
+After about a minute without input the dictionary OS arms its real-time-clock alarm for auto
+power-off. In the upstream core nothing acknowledges that interrupt, so it fires after every
+instruction and the game locks up and crawls. Acknowledging it lets the OS power off, which
+hangs the emulator. This port doesn't raise the alarm interrupt at all, so games can idle
+indefinitely. The macOS frontend uses the unpatched core and is affected too.
+
 ## Building
 
 Requires the [Playdate SDK](https://play.date/dev/), Rust stable with the

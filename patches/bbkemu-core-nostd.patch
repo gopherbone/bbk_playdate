@@ -1450,7 +1450,25 @@
                  self.flash_cycles = 0;
              }
              _ => {
-@@ -637,6 +830,7 @@
+@@ -614,8 +807,15 @@
+             }
+         }
+ 
+-        // Alarm matching: check when STCTCON bit 5 is set
+-        if (stctcon & 0x20) != 0
++        // Alarm matching: check when STCTCON bit 5 is set.
++        //
++        // Disabled: the OS uses the alarm for auto power-off after a minute
++        // without input. Nothing acknowledges it, so it fires after every
++        // instruction and the game locks up; acknowledged, the OS powers
++        // off, which hangs the emulator. (write_ram's 0x2028 guard meant to
++        // prevent auto power-off never sees that address.)
++        if false
++            && (stctcon & 0x20) != 0
+             && self.ram[registers::RTCMIN as usize] == self.ram[registers::ALMMIN as usize]
+             && self.ram[registers::RTCHR as usize] == self.ram[registers::ALMHR as usize]
+             && self.ram[registers::RTCDAYL as usize] == self.ram[registers::ALMDAYL as usize]
+@@ -637,6 +837,7 @@
  
      /// Restore flash command state from save state
      pub fn set_flash_state(&mut self, cmd: u8, cycles: u8) {
@@ -1458,7 +1476,7 @@
          self.flash_cmd = match cmd {
              1 => FlashCmd::ByteProgram,
              2 => FlashCmd::SoftwareId,
-@@ -658,7 +852,24 @@
+@@ -658,7 +859,24 @@
  }
  
  impl Bus for Memory {
@@ -1483,7 +1501,7 @@
          let value = self.read(address);
          if (registers::DATA1..=registers::DATA4).contains(&address) {
              let channel = (address - registers::DATA1) as usize;
-@@ -668,12 +879,9 @@
+@@ -668,12 +886,9 @@
          }
          value
      }
