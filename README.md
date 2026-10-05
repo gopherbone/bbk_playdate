@@ -5,14 +5,15 @@ It runs [BBKEmu](https://github.com/AloysHF/BBKEmu)'s emulator core (pulled in u
 the `upstream/` submodule, then patched at build time to run without the Rust standard library)
 behind a small C frontend.
 
-It comes ready to play: the A4980 system ROMs and **Demonbane Chronicle v0.2**, the English
-translation of 伏魔记, are bundled in the release.
+It comes ready to play. The release bundles the A4980 system ROMs and two English fan
+translations: **Demonbane Chronicle v0.3** (伏魔记) and **Heroes of Jin Yong v0.2**
+(金庸群侠传).
 
 | | |
 |---|---|
 | ![Game list with Chinese titles](docs/game-list.png) | ![Demonbane Chronicle title screen](docs/demonbane-title.png) |
-| ![Demonbane Chronicle prologue](docs/demonbane-prologue.png) | ![新仙剑奇侠传 title screen](docs/xianjian-title.png) |
-| ![新仙剑奇侠传 in game](docs/xianjian-game.png) | ![搬运工 (Sokoban)](docs/sokoban.png) |
+| ![Demonbane Chronicle prologue](docs/demonbane-prologue.png) | ![Heroes of Jin Yong opening poem](docs/heroes-intro.png) |
+| ![新仙剑奇侠传 title screen](docs/xianjian-title.png) | ![搬运工 (Sokoban)](docs/sokoban.png) |
 
 - The 159×96 LCD is drawn at 2× in portrait, or rotated at 1.5× for landscape games, with
   optional LCD ghosting shown by dithering.
@@ -26,7 +27,7 @@ Download `BBKEmu.pdx.zip` from the [latest release](../../releases/latest) and e
 [play.date/account/sideload](https://play.date/account/sideload/), or unzip it into the `Games`
 folder of the Playdate's data disk.
 
-Demonbane Chronicle is in the game list straight away. To add more games, run BBKEmu once so it
+Both translations are in the game list straight away. To add more games, run BBKEmu once so it
 creates its folders, then reboot the Playdate to its data disk (Settings → System → Reboot to
 Data Disk) and open the folder in `Data/` ending in `com.gopherbone.bbkemu` (sideloaded games
 get a `user.` prefix):
@@ -37,7 +38,7 @@ get a `user.` prefix):
 | A4988 system ROMs, for games that need that model | `ROMs/A4988/8.BIN` and `E.BIN` |
 
 Files in the Data folder take priority over the bundled ones, so you can also drop in your own
-A4980 ROMs or a newer build of the translation. Saves go to `Saves/<game>.bbksav` and states to
+A4980 ROMs or newer builds of the translations (same file names). Saves go to `Saves/<game>.bbksav` and states to
 `States/<game>/slotN.state`. This is the same layout and file format as the macOS BBKEmu
 frontend's `~/Library/Application Support/BBKEmu`, so ROMs, saves and states can be copied
 between them.
@@ -137,12 +138,13 @@ to install builds, run benchmarks and read its profiler. Commits it made carry a
   [Dirty Optimization Secrets (C for Playdate)](https://devforum.play.date/t/dirty-optimization-secrets-c-for-playdate/23011)
   on the Playdate developer forum, and the CrankBoy developers'
   [interview](https://www.readonlymemo.com/playdate-crankboy-emulator-interview).
-- Bundled: BBK A4980 system ROMs and 伏魔记 (BBK), and Demonbane Chronicle v0.2, gopherbone's
-  English translation of 伏魔记. Game titles are drawn with the 16×16 GB2312 font from the
-  bundled `8.BIN`; the lookup table is generated with Python's `gb2312` codec.
+- Bundled: BBK A4980 system ROMs, 伏魔记 and 金庸群侠传 (BBK), with gopherbone's English
+  translations Demonbane Chronicle v0.3 and Heroes of Jin Yong v0.2. Game titles are drawn
+  with the 16×16 GB2312 font from the bundled `8.BIN`; the lookup table is generated with
+  Python's `gb2312` codec.
 
 ## License
 
 The code is GPL-3.0-or-later, the same as BBKEmu; see [LICENSE](LICENSE). The bundled BBK system
-ROMs and 伏魔记 belong to BBK and are included as abandonware; Demonbane Chronicle is a fan
-translation.
+ROMs, 伏魔记 and 金庸群侠传 belong to BBK and are included as abandonware; Demonbane Chronicle
+and Heroes of Jin Yong are fan translations.

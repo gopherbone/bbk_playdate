@@ -355,6 +355,10 @@ static int autosave_countdown;
 static unsigned int last_ms;
 static int frame_acc; // thousandths of a frame
 static float frame_cost_ms; // smoothed time per emulated frame
+// Smoothed per-update times (ms): our render, and time spent outside update()
+// (mostly the system pushing changed rows to the LCD).
+static float render_ms, outside_ms;
+static unsigned int update_end_ms;
 // Deterministic benchmark: average cost of emulated frames 300-599 after boot.
 static int game_frames;
 static float bench_ms;
@@ -600,8 +604,9 @@ static void game_draw_status(int force) {
     } else if (settings.show_speed) {
         // Share of each real-time frame (16.7 ms) the emulator needs.
         int load = (int)(frame_cost_ms * 60.0f / 10.0f + 0.5f);
-        int n = snprintf(text, sizeof text, "%d.%d ms/frame %d%% load %d fps", (int)frame_cost_ms,
-                         (int)(frame_cost_ms * 10) % 10, load, (int)(pd->display->getFPS() + 0.5f));
+        int n = snprintf(text, sizeof text, "%d.%d ms/f %d%% %dfps rnd %d.%d out %d.%d", (int)frame_cost_ms,
+                         (int)(frame_cost_ms * 10) % 10, load, (int)(pd->display->getFPS() + 0.5f),
+                         (int)render_ms, (int)(render_ms * 10) % 10, (int)outside_ms, (int)(outside_ms * 10) % 10);
         if (bench_ms_result > 0)
             snprintf(text + n, sizeof text - n, "  bench %d.%d", (int)bench_ms_result, (int)(bench_ms_result * 10) % 10);
     }
@@ -639,6 +644,8 @@ static void before_frame(void* ud, uint32_t frame) {
 }
 
 static void game_update(void) {
+    unsigned int update_start_ms = pd->system->getCurrentTimeMilliseconds();
+    if (update_end_ms) outside_ms = outside_ms * 0.9f + (float)(update_start_ms - update_end_ms) * 0.1f;
     int redraw = needs_redraw;
     if (needs_redraw) {
         needs_redraw = 0;
@@ -687,6 +694,7 @@ static void game_update(void) {
     }
 
     static const uint8_t ghost_keep[3] = {0, 140, 200};
+    float r0 = pd->system->getElapsedTime();
     int first, last;
     uint8_t* frame = pd->graphics->getFrame();
     if (config.landscape) {
@@ -695,9 +703,11 @@ static void game_update(void) {
         bbk_render(emu, frame, LCD_ROWSIZE, 40, 24, 0, ghost_keep[settings.ghosting], &first, &last);
     }
     if (first <= last) pd->graphics->markUpdatedRows(first, last);
+    render_ms = render_ms * 0.9f + (pd->system->getElapsedTime() - r0) * 1000.0f * 0.1f;
 
     if (toast_frames > 0) toast_frames--;
     game_draw_status(redraw);
+    update_end_ms = pd->system->getCurrentTimeMilliseconds();
 }
 
 // MARK: Keypad

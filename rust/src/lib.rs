@@ -126,6 +126,16 @@ pub struct BBKEmulator {
     pixels: Box<[bool; PIXELS]>,
     /// Per-pixel darkness, 0 (clear) to 255 (fully on), for ghosting.
     intensity: Vec<u8>,
+    /// Pixels as of the last portrait render, and whether each source row's
+    /// ghosting had fully settled then: unchanged settled rows are skipped.
+    drawn: Box<[bool; PIXELS]>,
+    settled: [bool; LCD_HEIGHT],
+    /// Redraw every row next time (the frame buffer was cleared).
+    redraw_all: bool,
+    /// The LCD's RAM (0x400..0x1000, plus 0x1000 which is copied over 0x400)
+    /// as of the last portrait render: if it hasn't changed and every row has
+    /// settled, there is nothing to draw.
+    lcd_ram: Vec<u8>,
     /// Backing store for the last `bbk_battery_export` / `bbk_state_save`.
     export: Vec<u8>,
 }
@@ -159,6 +169,10 @@ pub extern "C" fn bbk_create(model: u32) -> *mut BBKEmulator {
         pristine_flash: Vec::new(),
         pixels: vec![false; PIXELS].into_boxed_slice().try_into().unwrap(),
         intensity: vec![0; PIXELS],
+        drawn: vec![false; PIXELS].into_boxed_slice().try_into().unwrap(),
+        settled: [false; LCD_HEIGHT],
+        redraw_all: true,
+        lcd_ram: vec![0; LCD_RAM.len() + 1],
         export: Vec::new(),
     }))
 }
@@ -328,6 +342,9 @@ pub extern "C" fn bbk_bench_interpreter(mode: u32, count: u32) -> u32 {
 
 // MARK: Rendering
 
+/// The part of RAM the LCD is decoded from (render_lcd_into also reads 0x1000).
+const LCD_RAM: core::ops::Range<usize> = 0x400..0x1000;
+
 /// 4x4 ordered-dither thresholds, used to show ghosting on the 1-bit screen.
 const BAYER4: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 
@@ -356,7 +373,123 @@ pub unsafe extern "C" fn bbk_render(
     if frame.is_null() {
         return;
     }
+    if !landscape && !e.redraw_all && e.settled.iter().all(|&s| s) {
+        let ram = &e.emu.cpu.memory().ram;
+        if ram[LCD_RAM] == e.lcd_ram[..LCD_RAM.len()] && ram[0x1000] == e.lcd_ram[LCD_RAM.len()] {
+            if !first_row.is_null() {
+                *first_row = i32::MAX;
+            }
+            if !last_row.is_null() {
+                *last_row = i32::MIN;
+            }
+            return;
+        }
+    }
+    {
+        let ram = &e.emu.cpu.memory().ram;
+        let n = LCD_RAM.len();
+        e.lcd_ram[..n].copy_from_slice(&ram[LCD_RAM]);
+        e.lcd_ram[n] = ram[0x1000];
+    }
     e.emu.render_lcd_into(&mut e.pixels);
+    let (first, last) = if landscape {
+        e.redraw_all = true; // portrait's row tracking doesn't cover this path
+        render_landscape(e, frame, rowbytes, x0, y0, ghosting)
+    } else {
+        render_portrait(e, frame, rowbytes, x0, y0, ghosting)
+    };
+    if !first_row.is_null() {
+        *first_row = first;
+    }
+    if !last_row.is_null() {
+        *last_row = last;
+    }
+}
+
+/// Moves `level` toward `target` (0 or 255), keeping `keep`/256 of the gap;
+/// snaps the last few steps so rows can settle exactly.
+#[inline(always)]
+fn fade(level: u8, target: i32, keep: i32) -> u8 {
+    let next = target + (((level as i32 - target) * keep) >> 8);
+    if (next - target).abs() < 4 {
+        target as u8
+    } else {
+        next as u8
+    }
+}
+
+/// Writes `bits` (MSB first, `width` pixels) into an output row, returning
+/// whether anything changed.
+unsafe fn store_row(row: &mut [u8], bits: &[u8], width: usize) -> bool {
+    let full = width / 8;
+    let mut changed = row[..full] != bits[..full];
+    row[..full].copy_from_slice(&bits[..full]);
+    let tail = width & 7;
+    if tail != 0 {
+        let mask = 0xFFu8 << (8 - tail);
+        let merged = (row[full] & !mask) | (bits[full] & mask);
+        changed |= row[full] != merged;
+        row[full] = merged;
+    }
+    changed
+}
+
+/// 2x portrait, row by row: source rows that haven't changed since the last
+/// render and whose ghosting has settled are skipped; settled rows skip the
+/// dither.
+unsafe fn render_portrait(e: &mut BBKEmulator, frame: *mut u8, rowbytes: usize, x0: u32, y0: u32, ghosting: u8) -> (i32, i32) {
+    const WIDTH: usize = LCD_WIDTH * 2;
+    let keep = ghosting.min(242) as i32;
+    let x_byte = (x0 / 8) as usize;
+    let mut first = i32::MAX;
+    let mut last = i32::MIN;
+    let mut bits = [0u8; WIDTH.div_ceil(8)];
+    for sy in 0..LCD_HEIGHT {
+        let span = sy * LCD_WIDTH..(sy + 1) * LCD_WIDTH;
+        let src = &e.pixels[span.clone()];
+        if !e.redraw_all && e.settled[sy] && *src == e.drawn[span.clone()] {
+            continue;
+        }
+        let mut settled = true;
+        for (level, &on) in e.intensity[span.clone()].iter_mut().zip(src) {
+            let target = if on { 255 } else { 0 };
+            *level = fade(*level, target, keep);
+            settled &= *level as i32 == target;
+        }
+        e.settled[sy] = settled;
+        e.drawn[span.clone()].copy_from_slice(src);
+        let levels = &e.intensity[span];
+        for half in 0..2 {
+            let r = sy * 2 + half;
+            if half == 0 || !settled {
+                // Settled rows are pure black/white: both output rows match.
+                let dither = &BAYER4[(r & 3) * 4..(r & 3) * 4 + 4];
+                let mut acc = 0u8;
+                for c in 0..WIDTH {
+                    let level = levels[c / 2];
+                    let white = if settled { level == 0 } else { level <= dither[c & 3] * 16 + 8 };
+                    acc = (acc << 1) | white as u8;
+                    if c & 7 == 7 {
+                        bits[c / 8] = acc;
+                    }
+                }
+                bits[WIDTH / 8] = acc << (8 - (WIDTH & 7));
+            }
+            let y = y0 as usize + r;
+            let row = slice::from_raw_parts_mut(frame.add(y * rowbytes + x_byte), WIDTH.div_ceil(8));
+            if store_row(row, &bits, WIDTH) {
+                first = first.min(y as i32);
+                last = last.max(y as i32);
+            }
+        }
+    }
+    e.redraw_all = false;
+    (first, last)
+}
+
+/// Rotated 1.5x landscape: redraws everything each time.
+unsafe fn render_landscape(e: &mut BBKEmulator, frame: *mut u8, rowbytes: usize, x0: u32, y0: u32, ghosting: u8) -> (i32, i32) {
+    let landscape = true;
     let keep = ghosting.min(242) as i32;
     for (level, &on) in e.intensity.iter_mut().zip(e.pixels.iter()) {
         let target = if on { 255 } else { 0 };
@@ -415,12 +548,7 @@ pub unsafe extern "C" fn bbk_render(
             last = last.max(y as i32);
         }
     }
-    if !first_row.is_null() {
-        *first_row = first;
-    }
-    if !last_row.is_null() {
-        *last_row = last;
-    }
+    (first, last)
 }
 
 /// Forgets ghosting history so the next frame draws crisp.
@@ -431,6 +559,7 @@ pub unsafe extern "C" fn bbk_render(
 pub unsafe extern "C" fn bbk_reset_ghosting(emu: *mut BBKEmulator) {
     if let Some(e) = emu_mut(emu) {
         e.intensity.fill(0);
+        e.redraw_all = true;
     }
 }
 
@@ -558,6 +687,7 @@ pub unsafe extern "C" fn bbk_state_load(emu: *mut BBKEmulator, data: *const u8, 
     }
     banks.set_selected(state.bank_switch.selected);
     e.intensity.fill(0);
+    e.redraw_all = true;
     true
 }
 
