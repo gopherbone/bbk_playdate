@@ -37,6 +37,7 @@ void bbk_reset_ghosting(BBKEmulator* emu);
 // Exports return a buffer owned by the emulator, valid until the next export
 // or bbk_release_export; NULL if there is nothing to export.
 const uint8_t* bbk_battery_export(BBKEmulator* emu, size_t* len);
+// False (and nothing changed) for files from older versions; see BATTERY_MAGIC.
 bool bbk_battery_import(BBKEmulator* emu, const uint8_t* data, size_t len);
 const uint8_t* bbk_state_save(BBKEmulator* emu, size_t* len);
 bool bbk_state_load(BBKEmulator* emu, const uint8_t* data, size_t len);

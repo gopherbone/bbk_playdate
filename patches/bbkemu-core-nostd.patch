@@ -110,7 +110,19 @@
          }
      }
  
-@@ -75,6 +84,12 @@
+@@ -63,6 +72,11 @@
+         self.inner.registers.status.bits()
+     }
+ 
++    /// Set the interrupt-disable flag (IRQ entry, as on a real 6502)
++    pub fn set_interrupt_disable(&mut self) {
++        self.inner.registers.status.insert(mos6502::registers::Status::PS_DISABLE_INTERRUPTS);
++    }
++
+     /// Get total cycles
+     pub fn cycles(&self) -> u64 {
+         self.inner.cycles
+@@ -75,6 +89,12 @@
  
      /// Execute a single instruction
      pub fn step(&mut self) -> u32 {
@@ -189,7 +201,79 @@
  use crate::audio::Audio;
  use crate::cheat::CheatEngine;
  use crate::cpu::CpuWrapper;
-@@ -252,7 +255,87 @@
+@@ -107,14 +110,13 @@
+         self.cpu.reset();
+         self.run_os_init();
+ 
+-        // Load game into flash at 0x20D000
+-        let flash_offset = 0xD000;
++        // Flash layout as gam4980's sys_load, by flash address (storage is a
++        // rotation of the chip, see memory::flash_index): system and game
++        // headers at 0, the game at 0xD000 (phys 0x20D000), the OS file
++        // tables at 0x1000 and at 0x8000 (A4988) / 0x7000 (A4980) with the
++        // save-area marker. (Upstream wrote the marker into the game image.)
++        // From the bbk_tl fork of BBKEmu.
+         let game_data = &gam.data;
+-        let end = (flash_offset + game_data.len()).min(self.cpu.memory().flash.len());
+-        self.cpu.memory_mut().flash[flash_offset..end]
+-            .copy_from_slice(&game_data[..end - flash_offset]);
+-
+-        // Setup flash headers
+         let sys_hdr = [
+             0xC0u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+             0x00, 0x2F,
+@@ -128,11 +130,24 @@
+         gam_hdr[13] = ((size >> 8) & 0xFF) as u8;
+         gam_hdr[14] = ((size >> 16) & 0xFF) as u8;
+         gam_hdr[15] = 0x3D;
++        let save_base: u32 = if self.model.bank_sys_d == 0x0E88 { 0x8000 } else { 0x7000 };
++        {
++            let flash = &mut self.cpu.memory_mut().flash;
++            let mut put = |addr: u32, data: &[u8]| {
++                for (i, b) in data.iter().enumerate() {
++                    flash[crate::memory::flash_index(addr + i as u32)] = *b;
++                }
++            };
++            put(0x0000, &sys_hdr);
++            put(0x0010, &gam_hdr);
++            put(0xD000, game_data);
++            put(0x1000, &[0x01; 0x100]);
++            put(0x1000, &[0x04; 0x0C]);
++            put(save_base, &[0x01; 0x100]);
++            put(save_base + 0xF8, &[0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x03, 0x02]);
++        }
++        self.cpu.memory().invalidate_page_cache();
+ 
+-        let flash_base = 0x8000;
+-        self.cpu.memory_mut().flash[flash_base..flash_base + 16].copy_from_slice(&sys_hdr);
+-        self.cpu.memory_mut().flash[flash_base + 16..flash_base + 32].copy_from_slice(&gam_hdr);
+-
+         // Setup bank mappings
+         self.cpu.memory_mut().bank_switch.set(0x5, 0x20D);
+         self.cpu.memory_mut().bank_switch.set(0x6, 0x20E);
+@@ -145,21 +160,6 @@
+         self.cpu.memory_mut().bank_switch.set(0xB, data_bank + 2);
+         self.cpu.memory_mut().bank_switch.set(0xC, data_bank + 3);
+ 
+-        // Setup save area (offset differs between models)
+-        let save_base = if self.model.bank_sys_d == 0x0E88 {
+-            0x8000 // A4988
+-        } else {
+-            0x7000 // A4980
+-        };
+-        self.cpu.memory_mut().flash[flash_base + save_base + 0xF8] = 0x02;
+-        self.cpu.memory_mut().flash[flash_base + save_base + 0xF9] = 0x02;
+-        self.cpu.memory_mut().flash[flash_base + save_base + 0xFA] = 0x02;
+-        self.cpu.memory_mut().flash[flash_base + save_base + 0xFB] = 0x02;
+-        self.cpu.memory_mut().flash[flash_base + save_base + 0xFC] = 0x02;
+-        self.cpu.memory_mut().flash[flash_base + save_base + 0xFD] = 0x02;
+-        self.cpu.memory_mut().flash[flash_base + save_base + 0xFE] = 0x03;
+-        self.cpu.memory_mut().flash[flash_base + save_base + 0xFF] = 0x02;
+-
+         // Set system control
+         self.cpu.memory_mut().write(0x2029, 0x0D);
+         self.cpu.memory_mut().write(0x202A, 0x02);
+@@ -252,7 +252,87 @@
      }
  
      /// Run one frame (~16.67ms at 60fps)
@@ -277,7 +361,7 @@
          // Apply cheats at the start of each frame
          if self.cheat.has_active_cheats() {
              let (ram, flash) = self.cpu.memory_mut().get_ram_and_flash();
-@@ -326,21 +409,7 @@
+@@ -326,23 +406,15 @@
              return 1;
          }
  
@@ -298,8 +382,26 @@
 -
          // Execute the instruction normally
          let cycles = self.cpu.step();
++        if cycles == 0 {
++            // mos6502 couldn't decode the opcode and did nothing: the game has
++            // crashed. Stop instead of spinning forever (from the bbk_tl fork).
++            self.running = false;
++            return 1;
++        }
  
-@@ -533,7 +602,12 @@
+         // Handle interrupts
+         self.handle_interrupts();
+@@ -436,6 +508,9 @@
+         self.cpu.memory_mut().ram[0x100 | sp.wrapping_sub(1) as usize] = (pc & 0xFF) as u8;
+         self.cpu.memory_mut().ram[0x100 | sp.wrapping_sub(2) as usize] = status;
+         self.cpu.set_sp(sp.wrapping_sub(3));
++        // IRQ entry sets the I flag, as on a real 6502; without it the RTC
++        // alarm re-entered forever (from the bbk_tl fork).
++        self.cpu.set_interrupt_disable();
+ 
+         // Each vector slot contains an executable ROM jump stub.
+         self.cpu.set_pc(0x0300 + (vector_idx as u16) * 4);
+@@ -533,7 +608,12 @@
      /// Render LCD to boolean buffer (true = foreground, false = background)
      pub fn render_lcd_buffer(&mut self) -> [bool; 159 * 96] {
          let mut pixels = [false; 159 * 96];
@@ -312,7 +414,7 @@
          self.cpu.memory_mut().ram[0x400] = self.cpu.memory().ram[0x1000];
          let ram = &self.cpu.memory().ram;
          let mut v = 0x400;
-@@ -541,7 +615,7 @@
+@@ -541,7 +621,7 @@
          for j in (-30i32..=65).rev() {
              let y = if j >= 0 { j } else { -j + 65 } as usize;
              for i in 1..20 {
@@ -321,7 +423,7 @@
                  v += 1;
              }
              v += 13;
-@@ -550,12 +624,10 @@
+@@ -550,12 +630,10 @@
          v = 0x413;
          for j in (-30i32..=64).rev() {
              let y = if j >= 0 { j } else { -j + 65 } as usize;
@@ -1131,7 +1233,7 @@
  pub mod input;
 --- a/src/memory.rs
 +++ b/src/memory.rs
-@@ -1,7 +1,30 @@
+@@ -1,7 +1,43 @@
  //! Memory bus with bank switching and hardware register handling
  
 +#[allow(unused_imports)]
@@ -1159,10 +1261,23 @@
 +#[inline(always)]
 +fn trace(_addr: u32, _write: bool) {}
 +
++/// Index into `Memory::flash` for a flash address. Storage is the whole chip
++/// rotated by 32 KiB (the last 32 KiB, the save area, first), as in gam4980;
++/// it is a bijection, so no two addresses share a cell.
++///
++/// Upstream rotated only the save area on reads but every address on writes,
++/// so writes outside the save area landed 32 KiB away and an in-game save
++/// erased part of the game. Rotating only the save area for both (an earlier
++/// attempt) aliases it onto 0x0000-0x7FFF, where the OS keeps its file
++/// tables. From the bbk_tl fork of BBKEmu.
++pub fn flash_index(addr: u32) -> usize {
++    ((addr + 0x8000) % FLASH_SIZE as u32) as usize
++}
++
  /// Physical memory map constants
  pub const RAM_SIZE: usize = 0x8000; // 32 KiB
  pub const FLASH_SIZE: usize = 0x200000; // 2 MiB
-@@ -136,7 +159,7 @@
+@@ -136,7 +172,7 @@
  }
  
  /// Flash command state
@@ -1171,7 +1286,7 @@
  enum FlashCmd {
      Normal,
      ByteProgram,
-@@ -161,6 +184,18 @@
+@@ -161,6 +197,18 @@
      flash_cycles: u8,
      /// Timer counters
      timer_counters: [u32; 5],
@@ -1190,7 +1305,7 @@
  }
  
  impl Default for Memory {
-@@ -174,6 +209,11 @@
+@@ -174,6 +222,11 @@
          Self {
              ram: vec![0; RAM_SIZE],
              flash: vec![0xFF; FLASH_SIZE],
@@ -1202,7 +1317,7 @@
              rom_8: None,
              rom_e: None,
              bank_switch: BankSwitch::new(),
-@@ -199,6 +239,7 @@
+@@ -199,6 +252,7 @@
          let len = data.len().min(ROM8_SIZE);
          rom[..len].copy_from_slice(&data[..len]);
          self.rom_8 = Some(rom);
@@ -1210,7 +1325,7 @@
      }
  
      /// Load OS ROM (E.BIN) - optional for HLE mode
-@@ -207,15 +248,134 @@
+@@ -207,15 +261,131 @@
          let len = data.len().min(ROME_SIZE);
          rom[..len].copy_from_slice(&data[..len]);
          self.rom_e = Some(rom);
@@ -1302,11 +1417,8 @@
 +        match page >> 9 {
 +            0 if page < 8 => self.ram[(page as usize) << 12..].as_ptr(),
 +            1 if matches!(self.flash_cmd, FlashCmd::Normal | FlashCmd::ByteProgram) => {
-+                let fa = (page - 0x200) << 12;
-+                // The save area (last 32 KiB) is rotated to the front; pages
-+                // never straddle that boundary.
-+                let fa = if fa >= FLASH_SIZE as u32 - 0x8000 { fa + 0x8000 - FLASH_SIZE as u32 } else { fa };
-+                self.flash[fa as usize..].as_ptr()
++                // Storage is rotated by 32 KiB; a 4 KiB page never straddles the wrap.
++                self.flash[flash_index((page - 0x200) << 12)..].as_ptr()
 +            }
 +            4 => self.rom_8.as_ref().map_or(core::ptr::null(), |rom| rom[((page - 0x800) as usize) << 12..].as_ptr()),
 +            7 => self.rom_e.as_ref().map_or(core::ptr::null(), |rom| rom[((page - 0xE00) as usize) << 12..].as_ptr()),
@@ -1345,7 +1457,7 @@
          match addr {
              // Page 0 - hardware registers
              0x0000..=0x00FF => self.read_page0(addr),
-@@ -233,7 +393,39 @@
+@@ -233,7 +403,44 @@
      }
  
      /// Write a byte to memory
@@ -1358,6 +1470,11 @@
 +            let b = (addr >> 12) as usize;
 +            let page = self.bank_switch.banks[b];
 +            let ptr = self.wpage_ptr[b].get();
++            if page == 2 && addr & 0x0FFF == 0x028 {
++                // RAM 0x2028: write_physical keeps the power-off countdown full.
++                self.write_reference(addr, val);
++                return;
++            }
 +            if self.wpage_key[b].get() == page && !ptr.is_null() {
 +                // SAFETY: a RAM page pointer from below; see the page_key field.
 +                unsafe { *ptr.add((addr & 0x0FFF) as usize) = val };
@@ -1385,15 +1502,40 @@
          match addr {
              0x0000..=0x00FF => self.write_page0(addr, val),
              0x0100..=0x02FF | 0x0400..=0x0FFF => {
-@@ -407,6 +599,7 @@
+@@ -405,8 +612,15 @@
+         if addr < 0x8000 {
+             // RAM
              self.ram[addr as usize] = val;
++            // 0x2028 is the OS's idle countdown (minutes) that powers off at 0;
++            // keep it full. write_ram's version of this never fires: 0x2028
++            // is only reached through here (from the bbk_tl fork).
++            if addr == 0x2028 {
++                self.ram[addr as usize] = 0xFF;
++            }
          } else if (0x200000..0x400000).contains(&addr) {
              // Flash
 +            self.flash_writes = self.flash_writes.wrapping_add(1);
              self.write_flash(addr - 0x200000, val);
          }
          // ROM areas are read-only
-@@ -453,7 +646,7 @@
+@@ -416,15 +630,7 @@
+     fn read_flash(&self, addr: u32) -> u8 {
+         match self.flash_cmd {
+             FlashCmd::Normal | FlashCmd::ByteProgram => {
+-                // For save area (last 32KiB), rotate to front
+-                // Otherwise, read directly
+-                let actual_addr = if addr >= FLASH_SIZE as u32 - 0x8000 {
+-                    // Save area: rotate last 32KiB to front
+-                    (addr + 0x8000) % FLASH_SIZE as u32
+-                } else {
+-                    addr
+-                };
+-                self.flash[actual_addr as usize]
++                self.flash[flash_index(addr)]
+             }
+             // Software ID and CFI query share the same info table
+             FlashCmd::SoftwareId | FlashCmd::CfiQuery => {
+@@ -453,7 +659,7 @@
                      self.flash_cycles += 1;
                  } else if val == 0xF0 {
                      // Software ID Exit / CFI Exit
@@ -1402,7 +1544,7 @@
                  }
              }
              1 | 4 => {
-@@ -470,7 +663,7 @@
+@@ -470,7 +676,7 @@
                  match val {
                      0xA0 => {
                          // Byte-Program
@@ -1411,7 +1553,7 @@
                          self.flash_cycles += 1;
                      }
                      0x80 => {
-@@ -478,17 +671,17 @@
+@@ -478,17 +684,17 @@
                      }
                      0x90 => {
                          // Software ID Entry
@@ -1432,16 +1574,48 @@
                          self.flash_cycles = 0;
                      }
                      _ => {}
-@@ -497,7 +690,7 @@
+@@ -497,11 +703,10 @@
              3 => {
                  // 4th Bus Write Cycle
                  if self.flash_cmd == FlashCmd::ByteProgram {
 -                    self.flash_cmd = FlashCmd::Normal;
 +                    self.set_flash_cmd(FlashCmd::Normal);
                      self.flash_cycles = 0;
-                     // Rotate last 32KiB to the front for save
-                     let addr = (addr + 0x8000) % FLASH_SIZE as u32;
-@@ -534,7 +727,7 @@
+-                    // Rotate last 32KiB to the front for save
+-                    let addr = (addr + 0x8000) % FLASH_SIZE as u32;
+-                    self.flash[addr as usize] = val;
++                    // Programming can only clear bits, as on real flash.
++                    self.flash[flash_index(addr)] &= val;
+                 } else if addr == 0x5555 && val == 0xAA {
+                     self.flash_cycles += 1;
+                 }
+@@ -514,27 +719,22 @@
+                         self.flash.fill(0xFF);
+                     }
+                     0x30 => {
+-                        // Sector-Erase
+-                        let addr = (addr + 0x8000) % FLASH_SIZE as u32;
++                        // Sector-Erase (4 KiB)
+                         let sector = addr & 0x1FF000;
+                         for i in 0..0x1000 {
+-                            self.flash[(sector + i) as usize] = 0xFF;
++                            self.flash[flash_index(sector + i)] = 0xFF;
+                         }
+                     }
+                     0x50 => {
+-                        // Block-Erase
+-                        let addr = ((addr & 0x1F0000) + 0x8000) % FLASH_SIZE as u32;
+-                        for i in 0..0x8000 {
+-                            self.flash[(addr + i) as usize] = 0xFF;
++                        // Block-Erase (64 KiB)
++                        let block = addr & 0x1F0000;
++                        for i in 0..0x10000 {
++                            self.flash[flash_index(block + i)] = 0xFF;
+                         }
+-                        let addr2 = (addr + 0x8000) % FLASH_SIZE as u32;
+-                        for i in 0..0x8000 {
+-                            self.flash[(addr2 + i) as usize] = 0xFF;
+-                        }
                      }
                      _ => {}
                  }
@@ -1450,24 +1624,6 @@
                  self.flash_cycles = 0;
              }
              _ => {
-@@ -614,8 +807,15 @@
-             }
-         }
- 
--        // Alarm matching: check when STCTCON bit 5 is set
--        if (stctcon & 0x20) != 0
-+        // Alarm matching: check when STCTCON bit 5 is set.
-+        //
-+        // Disabled: the OS uses the alarm for auto power-off after a minute
-+        // without input. Nothing acknowledges it, so it fires after every
-+        // instruction and the game locks up; acknowledged, the OS powers
-+        // off, which hangs the emulator. (write_ram's 0x2028 guard meant to
-+        // prevent auto power-off never sees that address.)
-+        if false
-+            && (stctcon & 0x20) != 0
-             && self.ram[registers::RTCMIN as usize] == self.ram[registers::ALMMIN as usize]
-             && self.ram[registers::RTCHR as usize] == self.ram[registers::ALMHR as usize]
-             && self.ram[registers::RTCDAYL as usize] == self.ram[registers::ALMDAYL as usize]
 @@ -637,6 +837,7 @@
  
      /// Restore flash command state from save state

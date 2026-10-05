@@ -24,7 +24,10 @@ use bbkemu_core::Emulator;
 use mos6502::registers::Status;
 
 const PIXELS: usize = LCD_WIDTH * LCD_HEIGHT;
-const BATTERY_MAGIC: &[u8; 8] = b"BBKBAT1\0";
+/// Battery saves are a diff of the flash array, so the magic versions its
+/// layout. BBKBAT1 files (and the macOS app's) used upstream's flash layout,
+/// whose save writes could corrupt the game; BBKBAT2 is the gam4980 layout.
+const BATTERY_MAGIC: &[u8; 8] = b"BBKBAT2\0";
 
 extern "C" {
     fn malloc(size: usize) -> *mut c_void;

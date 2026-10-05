@@ -90,6 +90,7 @@ $(RUST_SIM_LIB): $(CORE_STAMP) FORCE
 # Differential tests of the fast paths (host only). Lockstep games: make check GAMES="a.gam b.gam" ROMS=dir
 check: $(CORE_STAMP)
 	cargo run --release --manifest-path tools/difftest/Cargo.toml -- 3000 $(GAMES)
+	SAVESLOTS=1 cargo run --release --manifest-path tools/difftest/Cargo.toml -- "Source/Bundled/Demonbane Chronicle.gam"
 
 run: simulator
 	open -a "$(SDK)/bin/Playdate Simulator.app" $(PRODUCT)

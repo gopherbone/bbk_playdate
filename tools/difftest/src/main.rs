@@ -207,7 +207,111 @@ fn writes(configs: usize) -> usize {
     fails
 }
 
+/// Programs and erases flash through the CPU-visible bus (command sequences
+/// as the OS sends them) and checks every result reads back where it was
+/// written, inside and outside the rotated save area.
+fn flash_roundtrip() -> usize {
+    let mut m = Memory::new();
+    m.init();
+    let mut rng = Rng(4242);
+    let mut fails = 0;
+    // Banks: 2 -> flash page 5 (0x5555), 3 -> page 2 (0x2AAA), 4 -> target page.
+    m.bank_switch.banks[2] = 0x205;
+    m.bank_switch.banks[3] = 0x202;
+    let cmd = |m: &mut Memory, off: u16, v: u8| {
+        if off == 0x5555 { m.write(0x2555, v) } else { m.write(0x3AAA, v) }
+    };
+    for i in 0..4000 {
+        // Half the targets in the save area (last 32 KiB), half anywhere.
+        let off: u32 = if i % 2 == 0 { 0x1F8000 + (rng.next() % 0x8000) as u32 } else { (rng.next() % 0x200000) as u32 };
+        let page = off >> 12;
+        if page == 0x205 || page == 0x202 { continue; }
+        m.bank_switch.banks[4] = 0x200 + page;
+        let cpu = 0x4000 | (off & 0xFFF) as u16;
+        if i % 50 == 0 {
+            // Sector erase, then every byte of the sector must read FF.
+            for (o, v) in [(0x5555, 0xAA), (0x2AAA, 0x55), (0x5555, 0x80), (0x5555, 0xAA), (0x2AAA, 0x55)] { cmd(&mut m, o, v); }
+            m.write(cpu, 0x30);
+            for a in 0x4000..0x5000u16 {
+                if m.read(a) != 0xFF { fails += 1; break; }
+            }
+            continue;
+        }
+        let v = rng.byte();
+        for (o, c) in [(0x5555, 0xAA), (0x2AAA, 0x55), (0x5555, 0xA0)] { cmd(&mut m, o, c); }
+        m.write(cpu, v);
+        if m.read(cpu) != v {
+            if fails < 3 { println!("flash program at {off:06X}: wrote {v:02X}, read {:02X}", m.read(cpu)); }
+            fails += 1;
+        }
+    }
+    fails
+}
+
+/// Port of bbk_tl's tools/qa/saveslots.py: a fresh game, save to slots 1 and
+/// 2 from the in-game system menu, move between saves, load each back and
+/// compare the player position (RAM 0x1979..+8). Also reports how many
+/// frames the CPU stays busy after each save (how long saving takes).
+fn saveslots(game: &str) -> bool {
+    let rom = std::env::var("ROMS").unwrap();
+    let mut e = Emulator::new(&MODEL_4980);
+    e.load_rom_8(&std::fs::read(format!("{rom}/8.BIN")).unwrap());
+    e.load_rom_e(&std::fs::read(format!("{rom}/E.BIN")).unwrap());
+    e.load_gam(&std::fs::read(game).unwrap()).unwrap();
+    let run = |e: &mut Emulator, n: u32| for _ in 0..n { e.run_frame(); };
+    let tap = |e: &mut Emulator, k: BbkKey, hold: u32, wait: u32| {
+        e.key_down(k);
+        run(e, hold);
+        e.key_up();
+        run(e, wait);
+    };
+    // Frames until the CPU is mostly halted again (the game idles between inputs).
+    let busy = |e: &mut Emulator| {
+        let mut n = 0;
+        for _ in 0..3600 {
+            let c0 = e.cpu.cycles();
+            e.run_frame();
+            n += 1;
+            if e.cpu.cycles() - c0 < 30_000 { break; }
+        }
+        n
+    };
+    let to_sys = |e: &mut Emulator| {
+        tap(e, BbkKey::Exit, 2, 30);
+        for _ in 0..3 { tap(e, BbkKey::Down, 2, 20); }
+        tap(e, BbkKey::Enter, 2, 30);
+    };
+    let pos = |e: &Emulator| e.cpu.memory().ram[0x1979..0x1981].to_vec();
+    run(&mut e, 1000);
+    tap(&mut e, BbkKey::Enter, 4, 60);
+    tap(&mut e, BbkKey::Exit, 4, 240);
+    for _ in 0..14 { tap(&mut e, BbkKey::Enter, 4, 60); }
+    let p1 = pos(&e);
+    to_sys(&mut e); tap(&mut e, BbkKey::Down, 2, 30); tap(&mut e, BbkKey::Enter, 2, 40); tap(&mut e, BbkKey::Enter, 2, 0);
+    let save1 = busy(&mut e); run(&mut e, 240);
+    for _ in 0..3 { tap(&mut e, BbkKey::Left, 2, 10); }
+    run(&mut e, 60);
+    let p2 = pos(&e);
+    to_sys(&mut e); tap(&mut e, BbkKey::Down, 2, 30); tap(&mut e, BbkKey::Enter, 2, 40); tap(&mut e, BbkKey::Down, 2, 30); tap(&mut e, BbkKey::Enter, 2, 0);
+    let save2 = busy(&mut e); run(&mut e, 240);
+    for _ in 0..3 { tap(&mut e, BbkKey::Right, 2, 10); }
+    run(&mut e, 60);
+    to_sys(&mut e); tap(&mut e, BbkKey::Enter, 2, 40); tap(&mut e, BbkKey::Enter, 2, 90); run(&mut e, 300);
+    let l1 = pos(&e);
+    to_sys(&mut e); tap(&mut e, BbkKey::Enter, 2, 40); tap(&mut e, BbkKey::Down, 2, 30); tap(&mut e, BbkKey::Enter, 2, 90); run(&mut e, 300);
+    let l2 = pos(&e);
+    let ok = p1 == l1 && p2 == l2 && p1 != p2;
+    println!("{game}: save slots {} (p1 {:02x?} p2 {:02x?} l1 {:02x?} l2 {:02x?}); saves kept the CPU busy {save1} and {save2} frames; running {}",
+        if ok { "OK" } else { "FAILED" }, p1, p2, l1, l2, e.is_running());
+    ok
+}
+
 fn main() {
+    if std::env::var("SAVESLOTS").is_ok() {
+        for g in std::env::args().skip(1) { saveslots(&g); }
+        return;
+    }
+    println!("flash program/erase round trips: {} failures", flash_roundtrip());
     println!("memory writes: {} mismatched configs", writes(400));
     println!("memory reads: {} mismatches", reads(300));
     let iters: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(2000);

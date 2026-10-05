@@ -379,10 +379,19 @@ static void save_game_config(void) {
     write_file(path, (uint8_t*)buf, n);
 }
 
+#ifdef BBK_TIMING
+#define TIMING_LOG(...) pd->system->logToConsole(__VA_ARGS__)
+#else
+#define TIMING_LOG(...) ((void)0)
+#endif
+
 static void save_battery(void) {
     if (!emu) return;
     size_t len = 0;
+    unsigned int t0 = pd->system->getCurrentTimeMilliseconds();
     const uint8_t* data = bbk_battery_export(emu, &len);
+    unsigned int t1 = pd->system->getCurrentTimeMilliseconds();
+    TIMING_LOG("TIMING battery export %u ms (%u bytes)", t1 - t0, (unsigned)len);
     if (!data) return;
     if (last_battery && len == last_battery_len && !memcmp(data, last_battery, len)) {
         bbk_release_export(emu);
@@ -390,7 +399,9 @@ static void save_battery(void) {
     }
     char path[300];
     snprintf(path, sizeof path, "Saves/%s.bbksav", game_name);
-    if (write_file(path, data, len)) {
+    int written = write_file(path, data, len);
+    TIMING_LOG("TIMING battery write %u ms", pd->system->getCurrentTimeMilliseconds() - t1);
+    if (written) {
         free_buf(last_battery);
         last_battery = pd->system->realloc(NULL, len);
         if (last_battery) {
@@ -411,8 +422,12 @@ static void save_state(void) {
     pd->file->mkdir(dir);
     state_path(path, sizeof path, config.slot);
     size_t len = 0;
+    unsigned int t0 = pd->system->getCurrentTimeMilliseconds();
     const uint8_t* data = bbk_state_save(emu, &len);
+    unsigned int t1 = pd->system->getCurrentTimeMilliseconds();
     int ok = data && write_file(path, data, len);
+    TIMING_LOG("TIMING state encode %u ms, write %u ms (%u bytes)", t1 - t0,
+               pd->system->getCurrentTimeMilliseconds() - t1, (unsigned)len);
     bbk_release_export(emu);
     char msg[64];
     snprintf(msg, sizeof msg, ok ? "Saved state %d" : "Couldn't save state %d", config.slot);
@@ -514,11 +529,18 @@ static void start_game(const char* name) {
     snprintf(path, sizeof path, "Saves/%s.bbksav", game_name);
     size_t len;
     uint8_t* battery = read_file(path, &len);
+    int moved_aside = 0;
     if (battery && bbk_battery_import(emu, battery, len)) {
         last_battery = battery;
         last_battery_len = len;
-    } else {
+    } else if (battery) {
+        // A save from an older version (different flash layout): keep it,
+        // but out of the way, so the game starts clean.
         free_buf(battery);
+        char old[320];
+        snprintf(old, sizeof old, "%s.old", path);
+        pd->file->unlink(old, 0);
+        moved_aside = pd->file->rename(path, old) == 0;
     }
 
     held_count = 0;
@@ -538,6 +560,13 @@ static void start_game(const char* name) {
     game_add_menu_items();
     screen = SCREEN_GAME;
     needs_redraw = 1;
+    if (moved_aside) {
+        show_message("Old save set aside",
+                     "This game's save was made by an older version of BBKEmu, whose flash emulation "
+                     "could corrupt the game when saving. It has been renamed to .bbksav.old in the "
+                     "Saves folder and the game starts without it.",
+                     SCREEN_GAME);
+    }
 }
 
 static void restart_game(void) {

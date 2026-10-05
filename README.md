@@ -45,9 +45,9 @@ get a `user.` prefix):
 
 Files in the Data folder take priority over the bundled ones, so you can also drop in your own
 A4980 ROMs or newer builds of the translations (same file names). Saves go to `Saves/<game>.bbksav` and states to
-`States/<game>/slotN.state`. This is the same layout and file format as the macOS BBKEmu
-frontend's `~/Library/Application Support/BBKEmu`, so ROMs, saves and states can be copied
-between them.
+`States/<game>/slotN.state`. ROMs and save states can be copied to and from the macOS BBKEmu
+frontend's `~/Library/Application Support/BBKEmu`. Battery saves can't: this port fixes the
+flash emulation (below), which changes the file's layout.
 
 ## Controls
 
@@ -92,13 +92,25 @@ loop running on mos6502. Turn on **Show performance** in options to see the fram
 device. Its `bench` figure averages emulated frames 300 to 599, so builds can be compared on
 identical work.
 
-### Fix to upstream behaviour
+### Fixes to the upstream core
 
-After about a minute without input the dictionary OS arms its real-time-clock alarm for auto
-power-off. In the upstream core nothing acknowledges that interrupt, so it fires after every
-instruction and the game locks up and crawls. Acknowledging it lets the OS power off, which
-hangs the emulator. This port doesn't raise the alarm interrupt at all, so games can idle
-indefinitely. The macOS frontend uses the unpatched core and is affected too.
+These come from gopherbone's fork of BBKEmu in the bbk_tl translation project, where an
+automated playthrough found them. Without them the games can't be played through:
+
+- **Flash layout.** Upstream's flash reads rotated only the save area by 32 KiB while writes
+  rotated everything, so an in-game save erased parts of the game (blank screen, slow saves) and
+  a second save slot broke the OS's file tables. Flash is now one rotation of the whole chip, as
+  in gam4980, with the game and OS tables laid out as gam4980 does. Programming only clears bits,
+  as on real flash.
+- **Interrupts set the 6502's I flag**, so the real-time-clock alarm no longer re-enters forever
+  and freezes the game about a minute in.
+- **Auto power-off is held off** on the path the OS really uses, and the save-area marker no
+  longer overwrites 8 bytes of game code.
+- **An undefined opcode stops the game** instead of hanging the emulator.
+
+Battery saves from v0.2.1 and earlier, and from the macOS app, used the old flash layout. They are
+renamed to `.bbksav.old` when the game starts, and the game starts fresh. `make check` includes a
+two-slot save and load round trip.
 
 ## Building
 
