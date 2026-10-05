@@ -394,6 +394,28 @@ struct Synth {
     clock: u32,
     /// Fractional output sample carried between renders (in cycles * rate).
     frac: u64,
+    /// Soft mode: per-channel gain (for de-clicking) and low-pass state.
+    gain: [f32; 2],
+    lowpass: [f32; 2],
+}
+
+/// Soft mode's de-click ramp: full scale in about 3 ms.
+const GAIN_RAMP: f32 = 1.0 / (0.003 * SAMPLE_RATE as f32);
+/// Soft mode's low-pass coefficient: 1 - exp(-2*pi*2500/44100).
+const LOWPASS: f32 = 0.3002;
+
+/// PolyBLEP correction for a step at phase 0, phase `t` and increment `dt`
+/// in cycles (0..1): removes most of a naive square wave's aliasing.
+fn polyblep(t: f32, dt: f32) -> f32 {
+    if t < dt {
+        let x = t / dt;
+        x + x - x * x - 1.0
+    } else if t > 1.0 - dt {
+        let x = (t - 1.0) / dt;
+        x * x + x + x + 1.0
+    } else {
+        0.0
+    }
 }
 
 impl Synth {
@@ -404,7 +426,33 @@ impl Synth {
             let freq = TONE_CLOCK / (2.0 * periods[v] as f64);
             steps[v] = (freq / SAMPLE_RATE as f64 * 4_294_967_296.0) as u32;
         }
-        Self { steps, phase: [0; 2], regs: (0, 0, 0), clock: 0, frac: 0 }
+        Self { steps, phase: [0; 2], regs: (0, 0, 0), clock: 0, frac: 0, gain: [0.0; 2], lowpass: [0.0; 2] }
+    }
+
+    /// Soft mode: band-limited squares, de-clicked note edges and a gentle
+    /// two-pole low-pass. Nicer to listen to than the hardware, not accurate.
+    fn sample_soft(&mut self, volume: i32) -> i16 {
+        let (c1, c2, audcon) = self.regs;
+        let mut mix = 0.0f32;
+        for (i, (v, on)) in [(c1, audcon & 0x80 != 0), (c2, audcon & 0x40 != 0)].into_iter().enumerate() {
+            let step = self.steps[v as usize];
+            let target = if on && step != 0 { 1.0 } else { 0.0 };
+            let g = &mut self.gain[i];
+            *g = if *g < target { (*g + GAIN_RAMP).min(target) } else { (*g - GAIN_RAMP).max(target) };
+            if step != 0 {
+                self.phase[i] = self.phase[i].wrapping_add(step);
+            }
+            if *g > 0.0 && step != 0 {
+                let t = self.phase[i] as f32 * (1.0 / 4_294_967_296.0);
+                let dt = step as f32 * (1.0 / 4_294_967_296.0);
+                let half = if t >= 0.5 { t - 0.5 } else { t + 0.5 };
+                let square = if t < 0.5 { 1.0 } else { -1.0 } + polyblep(t, dt) - polyblep(half, dt);
+                mix += square * *g;
+            }
+        }
+        self.lowpass[0] += LOWPASS * (mix - self.lowpass[0]);
+        self.lowpass[1] += LOWPASS * (self.lowpass[0] - self.lowpass[1]);
+        (self.lowpass[1] * volume as f32) as i16
     }
 
     fn sample(&mut self, volume: i32) -> i16 {
@@ -423,12 +471,13 @@ impl Synth {
 
 /// Renders the sound for the CPU time run since the last call into `out`
 /// (mono, 44.1 kHz) and returns the number of samples written; time beyond
-/// `cap` samples is dropped. `volume` is each channel's amplitude.
+/// `cap` samples is dropped. `volume` is each channel's amplitude; `soft`
+/// selects the filtered rendition (see Synth::sample_soft).
 ///
 /// # Safety
 /// `out` must point to `cap` writable samples.
 #[no_mangle]
-pub unsafe extern "C" fn bbk_audio_render(emu: *mut BBKEmulator, out: *mut i16, cap: usize, volume: i32) -> usize {
+pub unsafe extern "C" fn bbk_audio_render(emu: *mut BBKEmulator, out: *mut i16, cap: usize, volume: i32, soft: bool) -> usize {
     let Some(e) = emu_mut(emu) else { return 0 };
     let mem = e.emu.cpu.memory_mut();
     let now = mem.audio_clock;
@@ -451,7 +500,7 @@ pub unsafe extern "C" fn bbk_audio_render(emu: *mut BBKEmulator, out: *mut i16, 
             s.regs = (c1, c2, audcon);
             events.next();
         }
-        *sample = s.sample(volume);
+        *sample = if soft { s.sample_soft(volume) } else { s.sample(volume) };
     }
     for (_, c1, c2, audcon) in events {
         s.regs = (c1, c2, audcon);

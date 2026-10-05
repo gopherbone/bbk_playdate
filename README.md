@@ -61,7 +61,7 @@ flash emulation (below), which changes the file's layout.
 | Ⓐ | Enter |
 | Ⓑ | Exit |
 | Menu → **keypad** | Any key: move with the crank or D-pad, Ⓐ presses it |
-| Menu → **options** | Save/load state, state slot, portrait/landscape, border (white, black or device), ghosting, sound, model, performance overlay, reset |
+| Menu → **options** | Save/load state, state slot, portrait/landscape, border (white, black or device), ghosting, sound (off, raw or soft), model, performance overlay, reset |
 | Menu → **game list** | Back to the list (saves first) |
 
 For landscape games, hold the Playdate with the crank on top; the D-pad turns with it.
@@ -133,6 +133,11 @@ chip, so this was reverse-engineered from the OS ROM:
   steps from the written value to a fixed state. That puts the songs on equal temperament to
   within a tenth of a semitone, with all three A's at exact factor-of-two periods. Value 0 never
   advances, which is why songs use it for rests.
+
+The **Sound** option has **Raw** (plain square waves, as the hardware presumably made them) and
+**Soft** (the default): band-limited squares without aliasing, a few milliseconds of fade on each
+note edge to stop clicks, and a gentle 2.5 kHz low-pass. Soft is easier on the ears and not
+meant to be accurate.
 
 What's still a guess: the absolute clock (tuned so `$AA` is A4 = 440 Hz; the true octave may
 differ), the exact counter details, the waveform (plain square waves), and the volume. Upstream

@@ -104,8 +104,10 @@ typedef struct {
     int ghosting;   // 0 off, 1 low, 2 high
     int show_speed;
     int border;     // BORDER_*
-    int sound;
+    int sound;      // SOUND_*
 } Settings;
+
+enum { SOUND_OFF, SOUND_RAW, SOUND_SOFT, SOUND_COUNT };
 
 enum { BORDER_WHITE, BORDER_BLACK, BORDER_DEVICE, BORDER_COUNT };
 
@@ -115,7 +117,7 @@ typedef struct {
     int slot;
 } GameConfig;
 
-static Settings settings = {1, 0, BORDER_WHITE, 1};
+static Settings settings = {1, 0, BORDER_WHITE, SOUND_SOFT};
 
 // Parses "key=value" lines, calling `apply` for each.
 static void read_kv(const char* path, void (*apply)(const char* key, int value, void* ud), void* ud) {
@@ -147,7 +149,7 @@ static void apply_setting(const char* key, int value, void* ud) {
     if (!strcmp(key, "ghosting")) settings.ghosting = value < 0 ? 0 : value > 2 ? 2 : value;
     else if (!strcmp(key, "show_speed")) settings.show_speed = value != 0;
     else if (!strcmp(key, "border")) settings.border = value >= 0 && value < BORDER_COUNT ? value : BORDER_WHITE;
-    else if (!strcmp(key, "sound")) settings.sound = value != 0;
+    else if (!strcmp(key, "sound")) settings.sound = value >= 0 && value < SOUND_COUNT ? value : SOUND_SOFT;
 }
 
 static void save_settings(void) {
@@ -382,7 +384,7 @@ static void audio_stop(void) {
 // Moves the sound emulated since the last call into the ring.
 static void audio_pump(BBKEmulator* emu) {
     static int16_t buf[4096];
-    size_t n = bbk_audio_render(emu, buf, sizeof buf / sizeof buf[0], AUDIO_VOLUME);
+    size_t n = bbk_audio_render(emu, buf, sizeof buf / sizeof buf[0], AUDIO_VOLUME, settings.sound == SOUND_SOFT);
     if (!settings.sound || !audio_source) return;
     uint32_t w = audio_write;
     if (w - audio_read > AUDIO_MAX_BACKLOG) audio_read = w - AUDIO_MAX_BACKLOG / 2;
@@ -940,6 +942,7 @@ static int opt_selected;
 static void option_label(int i, char* out, size_t cap) {
     static const char* ghost_names[3] = {"Off", "Low", "High"};
     static const char* border_names[BORDER_COUNT] = {"White", "Black", "Device"};
+    static const char* sound_names[SOUND_COUNT] = {"Off", "Raw", "Soft"};
     switch (i) {
     case OPT_SAVE: snprintf(out, cap, "Save state"); break;
     case OPT_LOAD: snprintf(out, cap, "Load state"); break;
@@ -947,7 +950,7 @@ static void option_label(int i, char* out, size_t cap) {
     case OPT_DISPLAY: snprintf(out, cap, "Display\t%s", config.landscape ? "Landscape" : "Portrait"); break;
     case OPT_BORDER: snprintf(out, cap, "Border\t%s", border_names[settings.border]); break;
     case OPT_GHOSTING: snprintf(out, cap, "LCD ghosting\t%s", ghost_names[settings.ghosting]); break;
-    case OPT_SOUND: snprintf(out, cap, "Sound\t%s", settings.sound ? "On" : "Off"); break;
+    case OPT_SOUND: snprintf(out, cap, "Sound\t%s", sound_names[settings.sound]); break;
     case OPT_MODEL: snprintf(out, cap, "Model (A switches, restarts)\t%s", model_name(config.model)); break;
     case OPT_SPEED: snprintf(out, cap, "Show performance\t%s", settings.show_speed ? "On" : "Off"); break;
     case OPT_RESET: snprintf(out, cap, "Reset game"); break;
@@ -1020,7 +1023,7 @@ static void options_update(void) {
             save_settings();
             break;
         case OPT_SOUND:
-            settings.sound = !settings.sound;
+            settings.sound = (settings.sound + dir + SOUND_COUNT) % SOUND_COUNT;
             save_settings();
             break;
         case OPT_SPEED:
