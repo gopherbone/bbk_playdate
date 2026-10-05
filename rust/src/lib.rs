@@ -401,8 +401,8 @@ struct Synth {
 
 /// Soft mode's de-click ramp: full scale in about 3 ms.
 const GAIN_RAMP: f32 = 1.0 / (0.003 * SAMPLE_RATE as f32);
-/// Soft mode's low-pass coefficient: 1 - exp(-2*pi*2500/44100).
-const LOWPASS: f32 = 0.3002;
+/// Soft mode's low-pass coefficient: 1 - exp(-2*pi*1600/44100).
+const LOWPASS: f32 = 0.2039;
 
 /// PolyBLEP correction for a step at phase 0, phase `t` and increment `dt`
 /// in cycles (0..1): removes most of a naive square wave's aliasing.

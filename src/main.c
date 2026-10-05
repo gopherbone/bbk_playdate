@@ -350,12 +350,22 @@ static void message_update(void) {
 
 // Emulated sound flows from the game task (bbk_audio_render after each batch
 // of frames) to the audio callback through this single-producer,
-// single-consumer ring.
+// single-consumer ring. Batches arrive every ~33 ms, so playback keeps a
+// cushion: it starts (and restarts after running dry) only once
+// AUDIO_PRIME samples are buffered, fades out instead of cutting off when
+// it runs dry, and catches up from a growing backlog by skipping a sample
+// now and then rather than jumping (either would click).
 #define AUDIO_RING 16384            // samples; a power of two
-#define AUDIO_MAX_BACKLOG 6000      // ~136 ms; beyond this, drop to stay in sync
+#define AUDIO_PRIME 4096            // ~93 ms cushion: two batches of frames
+#define AUDIO_HIGH 8192             // above this, skip 1 sample in 32
 #define AUDIO_VOLUME 5000           // per channel
 static int16_t audio_ring[AUDIO_RING];
 static volatile uint32_t audio_write, audio_read;
+static volatile uint32_t audio_underruns;
+static int audio_primed;
+static int32_t audio_last;
+static int32_t audio_fade;          // 0..AUDIO_FADE: fade-in after (re)starting
+#define AUDIO_FADE 256              // ~6 ms
 static SoundSource* audio_source;
 
 static int audio_callback(void* ctx, int16_t* left, int16_t* right, int len) {
@@ -363,14 +373,39 @@ static int audio_callback(void* ctx, int16_t* left, int16_t* right, int len) {
     (void)right;
     uint32_t r = audio_read, w = audio_write;
     int i = 0;
-    for (; i < len && r != w; i++, r++) left[i] = audio_ring[r & (AUDIO_RING - 1)];
-    for (; i < len; i++) left[i] = 0;
+    if (!audio_primed && w - r >= AUDIO_PRIME) {
+        audio_primed = 1;
+        audio_fade = 0;
+    }
+    if (audio_primed) {
+        for (; i < len; i++) {
+            if (r == w) {
+                audio_primed = 0;
+                audio_underruns++;
+                break;
+            }
+            if (w - r > AUDIO_HIGH && (i & 31) == 0) r++;   // catch up gently
+            if (r == w) continue;
+            int32_t s = audio_ring[r++ & (AUDIO_RING - 1)];
+            if (audio_fade < AUDIO_FADE) s = s * audio_fade++ / AUDIO_FADE;
+            audio_last = s;
+            left[i] = (int16_t)s;
+        }
+    }
+    // Ran dry or not started: decay from the last sample (~6 ms) instead of
+    // jumping to 0.
+    for (; i < len; i++) {
+        audio_last -= (audio_last + (audio_last > 0 ? 255 : -255)) / 256;
+        left[i] = (int16_t)audio_last;
+    }
     audio_read = r;
     return 1;
 }
 
 static void audio_start(void) {
     audio_read = audio_write = 0;
+    audio_primed = 0;
+    audio_last = 0;
     if (!audio_source) audio_source = pd->sound->addSource(audio_callback, NULL, 0);
 }
 
@@ -387,7 +422,6 @@ static void audio_pump(BBKEmulator* emu) {
     size_t n = bbk_audio_render(emu, buf, sizeof buf / sizeof buf[0], AUDIO_VOLUME, settings.sound == SOUND_SOFT);
     if (!settings.sound || !audio_source) return;
     uint32_t w = audio_write;
-    if (w - audio_read > AUDIO_MAX_BACKLOG) audio_read = w - AUDIO_MAX_BACKLOG / 2;
     for (size_t i = 0; i < n && w - audio_read < AUDIO_RING; i++, w++) audio_ring[w & (AUDIO_RING - 1)] = buf[i];
     audio_write = w;
 }
@@ -724,6 +758,7 @@ static void game_draw_status(int force) {
         int n = snprintf(text, sizeof text, "%d.%d ms/f %d%% %dfps rnd %d.%d out %d.%d", (int)frame_cost_ms,
                          (int)(frame_cost_ms * 10) % 10, load, (int)(pd->display->getFPS() + 0.5f),
                          (int)render_ms, (int)(render_ms * 10) % 10, (int)outside_ms, (int)(outside_ms * 10) % 10);
+        if (audio_source) n += snprintf(text + n, sizeof text - n, " au%u", (unsigned)audio_underruns);
         if (bench_ms_result > 0)
             snprintf(text + n, sizeof text - n, "  bench %d.%d", (int)bench_ms_result, (int)(bench_ms_result * 10) % 10);
     }

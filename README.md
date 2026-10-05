@@ -136,7 +136,7 @@ chip, so this was reverse-engineered from the OS ROM:
 
 The **Sound** option has **Raw** (plain square waves, as the hardware presumably made them) and
 **Soft** (the default): band-limited squares without aliasing, a few milliseconds of fade on each
-note edge to stop clicks, and a gentle 2.5 kHz low-pass. Soft is easier on the ears and not
+note edge to stop clicks, and a gentle 1.6 kHz low-pass. Soft is easier on the ears and not
 meant to be accurate.
 
 What's still a guess: the absolute clock (tuned so `$AA` is A4 = 440 Hz; the true octave may
